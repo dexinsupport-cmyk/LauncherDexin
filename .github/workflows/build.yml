@@ -3,13 +3,11 @@ name: Build SA-MP Launcher
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
 
 jobs:
   build:
-    name: Reassemble Parts and Build Release APK
+    name: Fast Build Release APK
     runs-on: ubuntu-22.04
 
     steps:
@@ -20,84 +18,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for f in \
-            sampstable_DexinMobile_updatedPart1.zip \
-            sampstable_DexinMobile_updatedPart2.zip \
-            sampstable_DexinMobile_updatedPart3.zip; do
+          for f in sampstable_DexinMobile_updatedPart1.zip sampstable_DexinMobile_updatedPart2.zip sampstable_DexinMobile_updatedPart3.zip; do
             test -f "$f"
-            echo "Found: $f"
+            echo "OK: $f"
             ls -lh "$f"
           done
 
-      - name: Install archive tools
+      # The three uploaded files are treated as independent ZIP archives.
+      # This avoids the very slow zip -FF / 7z recovery on GitHub runners.
+      - name: Verify and extract parts quickly
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y zip unzip p7zip-full
+          rm -rf _source _parts
+          mkdir -p _source _parts/1 _parts/2 _parts/3
 
-      - name: Reassemble and recover multipart source
-        shell: bash
-        run: |
-          set -euo pipefail
+          unzip -t sampstable_DexinMobile_updatedPart1.zip >/tmp/p1.log
+          unzip -t sampstable_DexinMobile_updatedPart2.zip >/tmp/p2.log
+          unzip -t sampstable_DexinMobile_updatedPart3.zip >/tmp/p3.log
 
-          P1="sampstable_DexinMobile_updatedPart1.zip"
-          P2="sampstable_DexinMobile_updatedPart2.zip"
-          P3="sampstable_DexinMobile_updatedPart3.zip"
+          unzip -q sampstable_DexinMobile_updatedPart1.zip -d _parts/1
+          unzip -q sampstable_DexinMobile_updatedPart2.zip -d _parts/2
+          unzip -q sampstable_DexinMobile_updatedPart3.zip -d _parts/3
 
-          rm -rf _source
-          mkdir -p _source
+          cp -a _parts/1/. _source/
+          cp -a _parts/2/. _source/
+          cp -a _parts/3/. _source/
 
-          echo "=========================================="
-          echo "REASSEMBLING BINARY PARTS"
-          echo "=========================================="
-
-          cat "$P1" "$P2" "$P3" > full_source.zip
-          ls -lh full_source.zip
-
-          echo "Testing normal ZIP..."
-          if unzip -t full_source.zip >/tmp/zip-test.log 2>&1; then
-            echo "NORMAL ZIP TEST PASSED"
-            unzip -q full_source.zip -d _source
-          else
-            echo "Normal ZIP test failed. Trying ZIP recovery..."
-            cat /tmp/zip-test.log || true
-
-            rm -f repaired_source.zip
-
-            if zip -FF full_source.zip --out repaired_source.zip >/tmp/zip-repair.log 2>&1; then
-              echo "zip -FF completed. Testing repaired archive..."
-
-              if unzip -t repaired_source.zip >/tmp/repaired-test.log 2>&1; then
-                echo "REPAIRED ZIP TEST PASSED"
-                unzip -q repaired_source.zip -d _source
-              else
-                echo "Repaired ZIP is still invalid."
-                cat /tmp/repaired-test.log || true
-                echo "Trying 7-Zip as a final recovery method..."
-                rm -rf _source/*
-                if 7z t full_source.zip >/tmp/7z-test.log 2>&1; then
-                  7z x -y full_source.zip -o_source
-                else
-                  cat /tmp/7z-test.log || true
-                  exit 1
-                fi
-              fi
-            else
-              cat /tmp/zip-repair.log || true
-              echo "Trying 7-Zip as a final recovery method..."
-              if 7z t full_source.zip >/tmp/7z-test.log 2>&1; then
-                7z x -y full_source.zip -o_source
-              else
-                cat /tmp/7z-test.log || true
-                exit 1
-              fi
-            fi
-          fi
-
-          echo "=========================================="
-          echo "SOURCE EXTRACTION COMPLETE"
-          echo "=========================================="
+          echo "Source assembled from 3 valid ZIP parts."
           find _source -type f -name gradlew -print
 
       - name: Locate Gradle project
@@ -128,14 +76,29 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK NDK and CMake
+      - name: Install only missing Android SDK components
         shell: bash
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager 'platform-tools' 'platforms;android-34' 'build-tools;34.0.0' 'ndk;26.2.11394342' 'cmake;3.22.1'
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
-      - name: Fix Linux case-sensitive headers (RakNet)
+          INSTALLED="$(sdkmanager --list_installed 2>/dev/null || true)"
+          NEED=()
+
+          echo "$INSTALLED" | grep -q 'platform-tools' || NEED+=("platform-tools")
+          echo "$INSTALLED" | grep -q 'platforms;android-34' || NEED+=("platforms;android-34")
+          echo "$INSTALLED" | grep -q 'build-tools;34.0.0' || NEED+=("build-tools;34.0.0")
+          echo "$INSTALLED" | grep -q 'ndk;26.2.11394342' || NEED+=("ndk;26.2.11394342")
+          echo "$INSTALLED" | grep -q 'cmake;3.22.1' || NEED+=("cmake;3.22.1")
+
+          if [ "${#NEED[@]}" -gt 0 ]; then
+            echo "Installing missing components: ${NEED[*]}"
+            sdkmanager "${NEED[@]}"
+          else
+            echo "All required Android components already exist on the runner."
+          fi
+
+      - name: Fix Linux case-sensitive native files
         shell: bash
         run: |
           set -euo pipefail
@@ -157,32 +120,35 @@ jobs:
           if [ -d "$VENDOR/raknet" ] && [ ! -d "$VENDOR/RakNet" ]; then
             mv "$VENDOR/raknet" "$VENDOR/RakNet"
           fi
-
           test -d "$VENDOR/RakNet"
 
-          find "$CPP" -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -print0 | xargs -0 -r sed -i -e 's|vendor/raknet/|vendor/RakNet/|g' -e 's|vendor/RakNet/raknet/|vendor/RakNet/|g' -e 's|"raknet/|"RakNet/|g' -e "s|'raknet/|'RakNet/|g"
+          find "$CPP" -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -print0 | \
+            xargs -0 -r sed -i \
+              -e 's|vendor/raknet/|vendor/RakNet/|g' \
+              -e 's|vendor/RakNet/raknet/|vendor/RakNet/|g' \
+              -e 's|"raknet/|"RakNet/|g' \
+              -e "s|'raknet/|'RakNet/|g"
 
-          EXPECTED="$VENDOR/RakNet/BitStream.h"
-          if [ ! -f "$EXPECTED" ]; then
+          if [ ! -f "$VENDOR/RakNet/BitStream.h" ]; then
             BITSTREAM="$(find "$CPP" -type f -iname 'BitStream.h' | head -n 1 || true)"
-            if [ -n "$BITSTREAM" ]; then
-              cp -f "$BITSTREAM" "$EXPECTED"
-            else
-              echo 'ERROR: BitStream.h not found.'
-              exit 1
-            fi
+            test -n "$BITSTREAM"
+            cp -f "$BITSTREAM" "$VENDOR/RakNet/BitStream.h"
           fi
-          test -f "$EXPECTED"
+          test -f "$VENDOR/RakNet/BitStream.h"
 
-      - name: Verify server configuration
+      - name: Verify server and DexinMobile configuration
         shell: bash
         run: |
           set -euo pipefail
           SETTINGS="$PROJECT_DIR/app/src/main/cpp/samp/settings.cpp"
           if [ -f "$SETTINGS" ]; then
-            echo 'Checking server configuration...'
+            echo "Server configuration:"
             grep -n -E '5\.57\.37\.215|7777' "$SETTINGS" || true
           fi
+
+          echo "Checking DexinMobile path references..."
+          grep -Rni --include='*.cpp' --include='*.h' --include='*.java' --include='*.kt' \
+            -E 'DexinMobile|/storage/emulated/0' "$PROJECT_DIR/app/src/main" 2>/dev/null | head -50 || true
 
       - name: Create temporary keystore for CI
         shell: bash
@@ -190,7 +156,16 @@ jobs:
           set -euo pipefail
           KEYSTORE="$PROJECT_DIR/keystore_playmarket2.jks"
           if [ ! -f "$KEYSTORE" ]; then
-            keytool -genkeypair -alias my-key-alias -keyalg RSA -keysize 2048 -validity 10000 -keystore "$KEYSTORE" -storepass 'EDrp131211aA!!pass' -keypass 'EDrp131211aA!!pass' -dname 'CN=SA-MP CI, OU=CI, O=SA-MP, L=City, ST=State, C=US' -noprompt
+            keytool -genkeypair \
+              -alias my-key-alias \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -keystore "$KEYSTORE" \
+              -storepass 'EDrp131211aA!!pass' \
+              -keypass 'EDrp131211aA!!pass' \
+              -dname 'CN=SA-MP CI, OU=CI, O=SA-MP, L=City, ST=State, C=US' \
+              -noprompt
           fi
           test -f "$KEYSTORE"
 
@@ -203,12 +178,6 @@ jobs:
             sed -i 's/nativeSymbolUploadEnabled true/nativeSymbolUploadEnabled false/g' "$BG" || true
           fi
 
-      - name: Remove old build dirs
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf "$PROJECT_DIR/app/.cxx" "$PROJECT_DIR/app/build"
-
       - name: Check Gradle
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -217,19 +186,18 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --no-daemon --version
 
-      - name: Gradle clean
-        working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./gradlew --no-daemon --stacktrace clean
-
+      # Do not run clean: it wastes time and deletes useful Gradle/CMake caches.
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -o pipefail
-          ./gradlew --no-daemon --stacktrace --warning-mode all :app:assembleRelease 2>&1 | tee /tmp/gradle-build.log
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            --build-cache \
+            --parallel \
+            :app:assembleRelease 2>&1 | tee /tmp/gradle-build.log
 
       - name: Upload build log on failure
         if: failure()
@@ -237,7 +205,7 @@ jobs:
         with:
           name: gradle-build-log
           path: /tmp/gradle-build.log
-          retention-days: 7
+          retention-days: 3
 
       - name: Find generated APK
         if: success()
