@@ -89,7 +89,6 @@ jobs:
           CPP="$PROJECT_DIR/app/src/main/cpp"
           VENDOR="$CPP/samp/vendor"
 
-          # playerTabList.h
           PLAYER="$(find "$CPP" -type f -iname "playertablist.h" | head -n 1 || true)"
           if [ -n "$PLAYER" ]; then
             DIR="$(dirname "$PLAYER")"
@@ -97,7 +96,6 @@ jobs:
             echo "playerTabList.h fixed"
           fi
 
-          # RGBA.h
           RGBA="$(find "$CPP" -type f -iname "RGBA.h" | head -n 1 || true)"
           if [ -n "$RGBA" ]; then
             DIR="$(dirname "$RGBA")"
@@ -105,7 +103,6 @@ jobs:
             echo "RGBA.h fixed"
           fi
 
-          # پیدا کردن پوشه raknet
           RAKNET_DIR="$(find "$VENDOR" -maxdepth 1 -type d \( -name "raknet" -o -name "RakNet" \) | head -n 1 || true)"
           if [ -z "$RAKNET_DIR" ]; then
             echo "ERROR: raknet/RakNet directory not found"
@@ -114,13 +111,11 @@ jobs:
           fi
           echo "Found RakNet dir: $RAKNET_DIR"
 
-          # تغییر نام به RakNet اگر لازم باشد
           if [ "$(basename "$RAKNET_DIR")" = "raknet" ]; then
             mv "$RAKNET_DIR" "$VENDOR/RakNet"
             echo "Renamed raknet -> RakNet"
           fi
 
-          # همه includeهای raknet (حروف کوچک) را به RakNet تغییر بده
           echo "Patching includes: raknet -> RakNet"
           find "$CPP" -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.h" -o -name "*.hpp" \) -print0 | \
             xargs -0 sed -i 's|vendor/raknet/|vendor/RakNet/|g' || true
@@ -130,7 +125,7 @@ jobs:
             xargs -0 sed -i "s|'raknet/|'RakNet/|g" || true
 
           echo "Contents of RakNet:"
-          ls -la "$VENDOR/RakNet/" | head -30
+          ls -la "$VENDOR/RakNet/" | head -30 || true
 
       - name: Create temporary keystore for CI
         shell: bash
