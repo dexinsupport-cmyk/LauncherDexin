@@ -16,32 +16,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Detect and check source parts
+      - name: Check source parts
         shell: bash
         run: |
           set -euo pipefail
-          ls -lh *.zip || true
-
-          if [ -f sampstable_github_readyPart1.zip ] && [ -f sampstable_github_readyPart2.zip ] && [ -f sampstable_github_readyPart3.zip ]; then
-            echo "PART_PREFIX=sampstable_github_ready" >> "$GITHUB_ENV"
-            echo "Found: sampstable_github_readyPart*.zip"
-          elif [ -f sampstable_DexinMobile_updatedPart1.zip ] && [ -f sampstable_DexinMobile_updatedPart2.zip ] && [ -f sampstable_DexinMobile_updatedPart3.zip ]; then
-            echo "PART_PREFIX=sampstable_DexinMobile_updated" >> "$GITHUB_ENV"
-            echo "Found: sampstable_DexinMobile_updatedPart*.zip"
-          else
-            echo "ERROR: zip parts not found"
-            ls -la
-            exit 1
-          fi
+          test -f sampstable_DexinMobile_updatedPart1.zip
+          test -f sampstable_DexinMobile_updatedPart2.zip
+          test -f sampstable_DexinMobile_updatedPart3.zip
+          ls -lh sampstable_DexinMobile_updatedPart*.zip
 
       - name: Reassemble original ZIP
         shell: bash
         run: |
           set -euo pipefail
-          cat "\( {PART_PREFIX}Part1.zip" " \){PART_PREFIX}Part2.zip" "${PART_PREFIX}Part3.zip" > full_source.zip
+          cat sampstable_DexinMobile_updatedPart1.zip sampstable_DexinMobile_updatedPart2.zip sampstable_DexinMobile_updatedPart3.zip > full_source.zip
           ls -lh full_source.zip
-          file full_source.zip || true
-          xxd full_source.zip | head -5 || true
 
       - name: Verify reconstructed ZIP
         shell: bash
