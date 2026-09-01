@@ -25,13 +25,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           echo "Checking 3 split source parts..."
-
           test -f "sampstable_github_readyPart1.zip"
           test -f "sampstable_github_readyPart2.zip"
           test -f "sampstable_github_readyPart3.zip"
-
           echo "Part 1: $(stat -c%s sampstable_github_readyPart1.zip) bytes"
           echo "Part 2: $(stat -c%s sampstable_github_readyPart2.zip) bytes"
           echo "Part 3: $(stat -c%s sampstable_github_readyPart3.zip) bytes"
@@ -41,37 +38,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           echo "Reassembling original archive from Part 1 + Part 2 + Part 3..."
-
           cat \
             sampstable_github_readyPart1.zip \
             sampstable_github_readyPart2.zip \
             sampstable_github_readyPart3.zip \
             > sampstable_github_ready.zip
-
           echo "Reassembled size: $(stat -c%s sampstable_github_ready.zip) bytes"
-
-          echo "Testing ZIP integrity..."
           unzip -t sampstable_github_ready.zip
-
           echo "✓ ZIP integrity check passed."
 
       - name: Extract complete source
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf _source
           mkdir -p _source
-
           unzip -q sampstable_github_ready.zip -d _source
-
           test -d "_source/sampstable"
           test -f "_source/sampstable/gradlew"
           test -f "_source/sampstable/settings.gradle"
           test -f "_source/sampstable/app/build.gradle"
-
           echo "✓ Complete source extracted."
 
       # =====================================================
@@ -94,18 +81,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          yes | sdkmanager --licenses >/dev/null || true
-
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager \
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0" \
             "ndk;26.2.11394342" \
             "cmake;3.22.1"
-
           echo "ANDROID_HOME=$ANDROID_HOME"
-          ls -la "$ANDROID_HOME/ndk/26.2.11394342"
+          test -d "$ANDROID_HOME/ndk/26.2.11394342"
 
       # =====================================================
       # PREPARE PROJECT
@@ -116,16 +100,19 @@ jobs:
         run: |
           set -euo pipefail
 
+          # The original gradlew uses Windows CRLF line endings.
+          # Convert it to Unix LF before executing it.
+          sed -i 's/\r$//' ./gradlew
+          sed -i 's/\r$//' ./gradle/wrapper/gradle-wrapper.properties
           chmod +x ./gradlew
 
           # AGP 8.2.1 is used by this project.
-          # Use Gradle 8.2.1 for the most reliable AGP compatibility.
+          # Use Gradle 8.2.1 for reliable AGP compatibility.
           sed -i 's#gradle-[0-9.]*-bin.zip#gradle-8.2.1-bin.zip#' gradle/wrapper/gradle-wrapper.properties
 
           echo "Gradle wrapper configuration:"
           cat gradle/wrapper/gradle-wrapper.properties
 
-          # The app expects this keystore at the project root.
           if [ ! -f "keystore_playmarket2.jks" ]; then
             echo "Creating CI signing keystore..."
             keytool -genkeypair \
@@ -148,7 +135,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           ./gradlew --no-daemon --stacktrace --warning-mode all :app:assembleRelease
 
       # =====================================================
@@ -158,7 +144,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           echo "Generated APK files:"
           find _source/sampstable/app/build/outputs/apk \
             -type f \
