@@ -18,110 +18,71 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== STEP 02: CHECKING SOURCE PARTS ==='
+          echo '=== 02 CHECK PARTS ==='
           for f in sampstable_DexinMobile_updatedPart1.zip sampstable_DexinMobile_updatedPart2.zip sampstable_DexinMobile_updatedPart3.zip; do
             test -f "$f"
-            echo "FOUND: $f"
-            ls -lh "$f"
+            stat -c '%n: %s bytes' "$f"
           done
 
-      - name: 03 - Assemble multipart source
+      - name: 03 - Rebuild source archive
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== STEP 03: ASSEMBLING SOURCE ==='
-          rm -rf _source _parts multipart
-          mkdir -p _source _parts/1 _parts/2 _parts/3 multipart
+          echo '=== 03 REBUILD SOURCE ==='
+          rm -rf _source multipart
+          mkdir -p _source multipart
+          P1=sampstable_DexinMobile_updatedPart1.zip
+          P2=sampstable_DexinMobile_updatedPart2.zip
+          P3=sampstable_DexinMobile_updatedPart3.zip
 
-          P1='sampstable_DexinMobile_updatedPart1.zip'
-          P2='sampstable_DexinMobile_updatedPart2.zip'
-          P3='sampstable_DexinMobile_updatedPart3.zip'
+          cat "$P1" "$P2" "$P3" > multipart/full.zip
+          echo "Combined size: $(stat -c '%s' multipart/full.zip) bytes"
 
-          echo 'Testing whether parts are standalone ZIP files...'
-          STANDALONE=true
-          for f in "$P1" "$P2" "$P3"; do
-            if unzip -t "$f" >/dev/null 2>&1; then
-              echo "VALID ZIP: $f"
-            else
-              echo "NOT standalone ZIP: $f"
-              STANDALONE=false
-            fi
-          done
-
-          if [ "$STANDALONE" = true ]; then
-            echo 'Mode: independent ZIP archives'
-            unzip -q "$P1" -d _parts/1
-            unzip -q "$P2" -d _parts/2
-            unzip -q "$P3" -d _parts/3
-            cp -a _parts/1/. _source/
-            cp -a _parts/2/. _source/
-            cp -a _parts/3/. _source/
+          if unzip -t multipart/full.zip >/tmp/ziptest.log 2>&1; then
+            echo 'Direct binary reconstruction: OK'
+            unzip -q multipart/full.zip -d _source
           else
-            echo 'Mode: multipart/split archive'
-            echo 'Trying direct binary concatenation first...'
-            cat "$P1" "$P2" "$P3" > multipart/full.zip
-
-            if unzip -t multipart/full.zip >/tmp/full_zip_test.log 2>&1; then
-              echo 'Direct concatenation succeeded.'
-              unzip -q multipart/full.zip -d _source
-            else
-              echo 'Direct concatenation is not a complete ZIP.'
-              echo 'Trying split-ZIP volume layout...'
-
-              rm -f multipart/full.zip multipart/full.z01 multipart/full.z02 multipart/full.z03
-              cp "$P1" multipart/full.z01
-              cp "$P2" multipart/full.z02
-              cp "$P3" multipart/full.zip
-
-              if command -v zip >/dev/null 2>&1 && zip -s 0 multipart/full.zip --out multipart/combined.zip >/tmp/zip_combine.log 2>&1; then
-                echo 'Split-ZIP volumes combined successfully.'
-                unzip -q multipart/combined.zip -d _source
-              else
-                echo 'Split-ZIP combine failed.'
-                echo 'The uploaded parts are not a valid binary split or standard split-ZIP set.'
-                echo 'Part sizes:'
-                stat -c '%n %s bytes' "$P1" "$P2" "$P3"
-                echo 'First 16 bytes of each part:'
-                xxd -l 16 "$P1" || true
-                xxd -l 16 "$P2" || true
-                xxd -l 16 "$P3" || true
-                echo 'Last 16 bytes of each part:'
-                tail -c 16 "$P1" | xxd || true
-                tail -c 16 "$P2" | xxd || true
-                tail -c 16 "$P3" | xxd || true
-                echo 'ZIP combine log:'
-                cat /tmp/zip_combine.log || true
-                echo 'Direct ZIP test log:'
-                cat /tmp/full_zip_test.log || true
-                exit 1
-              fi
+            echo 'Direct reconstruction has no central directory; running fast ZIP repair...'
+            rm -f multipart/recovered.zip
+            set +e
+            yes | zip -FF multipart/full.zip --out multipart/recovered.zip >/tmp/zipfix.log 2>&1
+            FIX_RC=$?
+            set -e
+            cat /tmp/zipfix.log || true
+            if [ "$FIX_RC" -ne 0 ] || [ ! -s multipart/recovered.zip ]; then
+              echo 'ZIP repair failed.'
+              echo 'The three uploaded parts do not contain a recoverable complete archive.'
+              echo 'Part boundaries/content must be recreated from the original source ZIP.'
+              echo 'Tail of combined archive:'
+              tail -c 64 multipart/full.zip | xxd || true
+              exit 1
             fi
+            unzip -t multipart/recovered.zip
+            unzip -q multipart/recovered.zip -d _source
           fi
 
-          echo '=== SOURCE ASSEMBLY COMPLETE ==='
-          echo 'Searching for Gradle wrapper...'
+          echo '=== SOURCE READY ==='
           find _source -type f -name gradlew -print
 
       - name: 04 - Locate Gradle project
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== STEP 04: LOCATING GRADLE PROJECT ==='
-          GRADLEW="$(find _source -type f -name gradlew | head -n 1)"
+          echo '=== 04 LOCATE GRADLE ==='
+          GRADLEW=$(find _source -type f -name gradlew | head -n 1)
           test -n "$GRADLEW"
-          PROJECT_DIR="$(dirname "$GRADLEW")"
+          PROJECT_DIR=$(dirname "$GRADLEW")
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "PROJECT_DIR=$PROJECT_DIR"
+          echo "Project: $PROJECT_DIR"
 
       - name: 05 - Fix Linux line endings
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== STEP 05: FIXING LINE ENDINGS ==='
+          echo '=== 05 LINE ENDINGS ==='
           sed -i 's/\r$//' "$PROJECT_DIR/gradlew"
           find "$PROJECT_DIR" -type f \( -name '*.sh' -o -name '*.gradle' -o -name '*.gradle.kts' -o -name '*.properties' -o -name '*.xml' -o -name '*.cmake' -o -name 'CMakeLists.txt' \) -exec sed -i 's/\r$//' {} \;
           chmod +x "$PROJECT_DIR/gradlew"
-          echo 'Line endings OK.'
 
       - name: 06 - Set up JDK 17
         uses: actions/setup-java@v4
@@ -133,92 +94,60 @@ jobs:
       - name: 07 - Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: 08 - Install Android SDK components
+      - name: 08 - Install Android components
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== STEP 08: ANDROID SDK ==='
+          echo '=== 08 ANDROID COMPONENTS ==='
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager \
-            'platform-tools' \
-            'platforms;android-34' \
-            'build-tools;34.0.0' \
-            'ndk;26.2.11394342' \
-            'cmake;3.22.1'
-          echo 'Android SDK components ready.'
+          sdkmanager 'platform-tools' 'platforms;android-34' 'build-tools;34.0.0' 'ndk;26.2.11394342' 'cmake;3.22.1'
 
-      - name: 09 - Fix native Linux case sensitivity
+      - name: 09 - Fix native case sensitivity
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== STEP 09: NATIVE FILE FIXES ==='
+          echo '=== 09 NATIVE FIXES ==='
           CPP="$PROJECT_DIR/app/src/main/cpp"
           VENDOR="$CPP/samp/vendor"
           test -d "$CPP"
           test -d "$VENDOR"
 
-          PLAYER="$(find "$CPP" -type f -iname 'playertablist.h' | head -n 1 || true)"
-          if [ -n "$PLAYER" ]; then
-            cp -f "$PLAYER" "$(dirname "$PLAYER")/playerTabList.h"
-            echo 'playerTabList.h fixed.'
-          fi
+          PLAYER=$(find "$CPP" -type f -iname 'playertablist.h' | head -n 1 || true)
+          if [ -n "$PLAYER" ]; then cp -f "$PLAYER" "$(dirname "$PLAYER")/playerTabList.h"; fi
 
-          RGBA="$(find "$CPP" -type f -iname 'RGBA.h' | head -n 1 || true)"
-          if [ -n "$RGBA" ]; then
-            cp -f "$RGBA" "$(dirname "$RGBA")/RGBA.h"
-            echo 'RGBA.h fixed.'
-          fi
+          RGBA=$(find "$CPP" -type f -iname 'RGBA.h' | head -n 1 || true)
+          if [ -n "$RGBA" ]; then cp -f "$RGBA" "$(dirname "$RGBA")/RGBA.h"; fi
 
-          if [ -d "$VENDOR/raknet" ] && [ ! -d "$VENDOR/RakNet" ]; then
-            mv "$VENDOR/raknet" "$VENDOR/RakNet"
-            echo 'raknet -> RakNet fixed.'
-          fi
+          if [ -d "$VENDOR/raknet" ] && [ ! -d "$VENDOR/RakNet" ]; then mv "$VENDOR/raknet" "$VENDOR/RakNet"; fi
           test -d "$VENDOR/RakNet"
 
-          find "$CPP" -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -print0 | \
-            xargs -0 -r sed -i \
-              -e 's|vendor/raknet/|vendor/RakNet/|g' \
-              -e 's|vendor/RakNet/raknet/|vendor/RakNet/|g' \
-              -e 's|"raknet/|"RakNet/|g' \
-              -e "s|'raknet/|'RakNet/|g"
+          find "$CPP" -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -print0 | xargs -0 -r sed -i -e 's|vendor/raknet/|vendor/RakNet/|g' -e 's|vendor/RakNet/raknet/|vendor/RakNet/|g' -e 's|"raknet/|"RakNet/|g' -e "s|'raknet/|'RakNet/|g"
 
           if [ ! -f "$VENDOR/RakNet/BitStream.h" ]; then
-            BITSTREAM="$(find "$CPP" -type f -iname 'BitStream.h' | head -n 1 || true)"
+            BITSTREAM=$(find "$CPP" -type f -iname 'BitStream.h' | head -n 1 || true)
             test -n "$BITSTREAM"
             cp -f "$BITSTREAM" "$VENDOR/RakNet/BitStream.h"
           fi
           test -f "$VENDOR/RakNet/BitStream.h"
-          echo 'Native files ready.'
 
-      - name: 10 - Verify DexinMobile server configuration
+      - name: 10 - Verify DexinMobile configuration
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== STEP 10: VERIFYING SERVER/DATA CONFIG ==='
+          echo '=== 10 DEXINMOBILE CONFIG ==='
           SETTINGS="$PROJECT_DIR/app/src/main/cpp/samp/settings.cpp"
           if [ -f "$SETTINGS" ]; then
             grep -n -E '5\.57\.37\.215|7777' "$SETTINGS" || true
           fi
-          grep -Rni --include='*.cpp' --include='*.h' --include='*.java' --include='*.kt' \
-            -E 'DexinMobile|/storage/emulated/0' "$PROJECT_DIR/app/src/main" 2>/dev/null | head -50 || true
+          grep -Rni --include='*.cpp' --include='*.h' --include='*.java' --include='*.kt' -E 'DexinMobile|5\.57\.37\.215|7777' "$PROJECT_DIR/app/src/main" 2>/dev/null | head -80 || true
 
       - name: 11 - Create temporary CI keystore
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== STEP 11: KEYSTORE ==='
           KEYSTORE="$PROJECT_DIR/keystore_playmarket2.jks"
           if [ ! -f "$KEYSTORE" ]; then
-            keytool -genkeypair \
-              -alias my-key-alias \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -keystore "$KEYSTORE" \
-              -storepass 'EDrp131211aA!!pass' \
-              -keypass 'EDrp131211aA!!pass' \
-              -dname 'CN=SA-MP CI, OU=CI, O=SA-MP, L=City, ST=State, C=US' \
-              -noprompt
+            keytool -genkeypair -alias my-key-alias -keyalg RSA -keysize 2048 -validity 10000 -keystore "$KEYSTORE" -storepass 'EDrp131211aA!!pass' -keypass 'EDrp131211aA!!pass' -dname 'CN=SA-MP CI, OU=CI, O=SA-MP, L=City, ST=State, C=US' -noprompt
           fi
           test -f "$KEYSTORE"
 
@@ -227,16 +156,14 @@ jobs:
         run: |
           set -euo pipefail
           BG="$PROJECT_DIR/app/build.gradle"
-          if [ -f "$BG" ]; then
-            sed -i 's/nativeSymbolUploadEnabled true/nativeSymbolUploadEnabled false/g' "$BG" || true
-          fi
+          if [ -f "$BG" ]; then sed -i 's/nativeSymbolUploadEnabled true/nativeSymbolUploadEnabled false/g' "$BG" || true; fi
 
       - name: 13 - Check Gradle
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== STEP 13: GRADLE CHECK ==='
+          echo '=== 13 GRADLE CHECK ==='
           chmod +x ./gradlew
           ./gradlew --no-daemon --version
 
@@ -245,14 +172,9 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          echo '=== STEP 14: BUILDING RELEASE APK ==='
-          ./gradlew \
-            --no-daemon \
-            --stacktrace \
-            --build-cache \
-            --parallel \
-            :app:assembleRelease 2>&1 | tee /tmp/gradle-build.log
-          echo '=== RELEASE APK BUILD FINISHED ==='
+          echo '=== 14 BUILD RELEASE APK ==='
+          ./gradlew --no-daemon --stacktrace --build-cache --parallel :app:assembleRelease 2>&1 | tee /tmp/gradle-build.log
+          echo '=== BUILD FINISHED ==='
 
       - name: 15 - Upload build log on failure
         if: failure()
@@ -268,7 +190,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== STEP 16: APK OUTPUT ==='
+          echo '=== 16 APK OUTPUT ==='
           find "$PROJECT_DIR" -type f -name '*.apk' -print
           APK_DIR="$PROJECT_DIR/app/build/outputs/apk/release"
           test -d "$APK_DIR"
