@@ -16,27 +16,38 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check source parts
+      - name: Detect and check source parts
         shell: bash
         run: |
           set -euo pipefail
-          test -f sampstable_DexinMobile_updatedPart1.zip
-          test -f sampstable_DexinMobile_updatedPart2.zip
-          test -f sampstable_DexinMobile_updatedPart3.zip
-          ls -lh sampstable_DexinMobile_updatedPart*.zip
+          ls -lh *.zip || true
+
+          if [ -f sampstable_github_readyPart1.zip ] && [ -f sampstable_github_readyPart2.zip ] && [ -f sampstable_github_readyPart3.zip ]; then
+            echo "PART_PREFIX=sampstable_github_ready" >> "$GITHUB_ENV"
+            echo "Found: sampstable_github_readyPart*.zip"
+          elif [ -f sampstable_DexinMobile_updatedPart1.zip ] && [ -f sampstable_DexinMobile_updatedPart2.zip ] && [ -f sampstable_DexinMobile_updatedPart3.zip ]; then
+            echo "PART_PREFIX=sampstable_DexinMobile_updated" >> "$GITHUB_ENV"
+            echo "Found: sampstable_DexinMobile_updatedPart*.zip"
+          else
+            echo "ERROR: zip parts not found"
+            ls -la
+            exit 1
+          fi
 
       - name: Reassemble original ZIP
         shell: bash
         run: |
           set -euo pipefail
-          cat sampstable_DexinMobile_updatedPart1.zip sampstable_DexinMobile_updatedPart2.zip sampstable_DexinMobile_updatedPart3.zip > sampstable_github_ready.zip
-          ls -lh sampstable_github_ready.zip
+          cat "\( {PART_PREFIX}Part1.zip" " \){PART_PREFIX}Part2.zip" "${PART_PREFIX}Part3.zip" > full_source.zip
+          ls -lh full_source.zip
+          file full_source.zip || true
+          xxd full_source.zip | head -5 || true
 
       - name: Verify reconstructed ZIP
         shell: bash
         run: |
           set -euo pipefail
-          unzip -t sampstable_github_ready.zip
+          unzip -t full_source.zip
 
       - name: Extract source
         shell: bash
@@ -44,7 +55,7 @@ jobs:
           set -euo pipefail
           rm -rf _source
           mkdir -p _source
-          unzip -q sampstable_github_ready.zip -d _source
+          unzip -q full_source.zip -d _source
           find _source -type f -name gradlew -print
 
       - name: Locate Gradle project
