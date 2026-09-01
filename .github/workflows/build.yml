@@ -20,16 +20,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f sampstable_github_readyPart1.zip
-          test -f sampstable_github_readyPart2.zip
-          test -f sampstable_github_readyPart3.zip
-          ls -lh sampstable_github_readyPart*.zip
+          test -f sampstable_DexinMobile_updatedPart1.zip
+          test -f sampstable_DexinMobile_updatedPart2.zip
+          test -f sampstable_DexinMobile_updatedPart3.zip
+          ls -lh sampstable_DexinMobile_updatedPart*.zip
 
       - name: Reassemble original ZIP
         shell: bash
         run: |
           set -euo pipefail
-          cat sampstable_github_readyPart1.zip sampstable_github_readyPart2.zip sampstable_github_readyPart3.zip > sampstable_github_ready.zip
+          cat sampstable_DexinMobile_updatedPart1.zip sampstable_DexinMobile_updatedPart2.zip sampstable_DexinMobile_updatedPart3.zip > sampstable_github_ready.zip
           ls -lh sampstable_github_ready.zip
 
       - name: Verify reconstructed ZIP
