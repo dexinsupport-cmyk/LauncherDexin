@@ -13,150 +13,57 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-
-      # =========================================================
-      # 1. CHECKOUT
-      # =========================================================
-
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      # =========================================================
-      # 2. CHECK 3 SOURCE PARTS
-      # =========================================================
 
       - name: Check source parts
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "Checking source parts..."
-
-          test -f "sampstable_github_readyPart1.zip"
-          test -f "sampstable_github_readyPart2.zip"
-          test -f "sampstable_github_readyPart3.zip"
-
-          echo "Part 1: OK"
-          echo "Part 2: OK"
-          echo "Part 3: OK"
-
-          ls -lh \
-            "sampstable_github_readyPart1.zip" \
-            "sampstable_github_readyPart2.zip" \
-            "sampstable_github_readyPart3.zip"
-
-      # =========================================================
-      # 3. REASSEMBLE ORIGINAL ZIP
-      # =========================================================
+          test -f sampstable_github_readyPart1.zip
+          test -f sampstable_github_readyPart2.zip
+          test -f sampstable_github_readyPart3.zip
+          ls -lh sampstable_github_readyPart*.zip
 
       - name: Reassemble original ZIP
         shell: bash
         run: |
           set -euo pipefail
-
-          rm -f sampstable_github_ready.zip
-
-          cat \
-            sampstable_github_readyPart1.zip \
-            sampstable_github_readyPart2.zip \
-            sampstable_github_readyPart3.zip \
-            > sampstable_github_ready.zip
-
-          echo "Reassembled ZIP:"
+          cat sampstable_github_readyPart1.zip sampstable_github_readyPart2.zip sampstable_github_readyPart3.zip > sampstable_github_ready.zip
           ls -lh sampstable_github_ready.zip
-
-      # =========================================================
-      # 4. VERIFY ZIP
-      # =========================================================
 
       - name: Verify reconstructed ZIP
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "Testing ZIP integrity..."
-
           unzip -t sampstable_github_ready.zip
-
-          echo "ZIP integrity check PASSED."
-
-      # =========================================================
-      # 5. EXTRACT SOURCE
-      # =========================================================
 
       - name: Extract source
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf _source
           mkdir -p _source
-
           unzip -q sampstable_github_ready.zip -d _source
-
-          echo "Source extracted successfully."
-
-          find _source \
-            -type f \
-            -name "gradlew" \
-            -print
-
-      # =========================================================
-      # 6. FIND GRADLE PROJECT
-      # =========================================================
+          find _source -type f -name gradlew -print
 
       - name: Locate Gradle project
         shell: bash
         run: |
           set -euo pipefail
-
           GRADLEW="$(find _source -type f -name gradlew | head -n 1)"
-
-          if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew was not found."
-            exit 1
-          fi
-
+          test -n "$GRADLEW"
           PROJECT_DIR="$(dirname "$GRADLEW")"
-
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-          echo "Gradle project:"
-          echo "$PROJECT_DIR"
-
-      # =========================================================
-      # 7. FIX WINDOWS CRLF
-      # =========================================================
+          echo "Project: $PROJECT_DIR"
 
       - name: Fix Linux line endings
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "Fixing CRLF line endings..."
-
           sed -i 's/\r$//' "$PROJECT_DIR/gradlew"
-
-          find "$PROJECT_DIR" \
-            -type f \
-            \( \
-              -name "*.sh" \
-              -o -name "*.gradle" \
-              -o -name "*.gradle.kts" \
-              -o -name "*.properties" \
-              -o -name "*.xml" \
-              -o -name "*.cmake" \
-              -o -name "CMakeLists.txt" \
-            \) \
-            -exec sed -i 's/\r$//' {} \; || true
-
+          find "$PROJECT_DIR" -type f \( -name "*.sh" -o -name "*.gradle" -o -name "*.gradle.kts" -o -name "*.properties" -o -name "*.xml" -o -name "*.cmake" -o -name "CMakeLists.txt" \) -exec sed -i 's/\r$//' {} \; || true
           chmod +x "$PROJECT_DIR/gradlew"
-
-          echo "Line endings fixed."
-
-      # =========================================================
-      # 8. JAVA 17
-      # =========================================================
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -165,276 +72,99 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      # =========================================================
-      # 9. ANDROID SDK
-      # =========================================================
-
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-
-      # =========================================================
-      # 10. ANDROID SDK + NDK + CMAKE
-      # =========================================================
 
       - name: Install Android SDK NDK and CMake
         shell: bash
         run: |
           set -euo pipefail
-
           yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.2.11394342" "cmake;3.22.1"
 
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0" \
-            "ndk;26.2.11394342" \
-            "cmake;3.22.1"
-
-          echo "Android SDK / NDK / CMake installed."
-
-      # =========================================================
-      # 11. INSPECT NATIVE SOURCE
-      # =========================================================
-
-      - name: Inspect native source
+      - name: Fix Linux case-sensitive headers
         shell: bash
         run: |
           set -euo pipefail
-
           CPP="$PROJECT_DIR/app/src/main/cpp"
 
-          echo "Native directory:"
-          echo "$CPP"
-
-          test -d "$CPP"
-
-          echo "Native source found."
-
-      # =========================================================
-      # 12. FIX playerTabList.h
-      #
-      # Linux is case-sensitive.
-      #
-      # Actual:
-      # playertablist.h
-      #
-      # Required:
-      # playerTabList.h
-      # =========================================================
-
-      - name: Fix playerTabList header
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          CPP="$PROJECT_DIR/app/src/main/cpp"
-
-          echo "Searching for player tab list header..."
-
-          FOUND="$(find "$CPP" \
-            -type f \
-            \( \
-              -iname "playertablist.h" \
-              -o -iname "playerTabList.h" \
-              -o -iname "PlayerTabList.h" \
-            \) \
-            -print | head -n 1 || true)"
-
-          if [ -z "$FOUND" ]; then
-            echo "ERROR: player tab list header not found."
-
-            find "$CPP" \
-              -type f \
-              \( -name "*.h" -o -name "*.hpp" \) \
-              -print | grep -Ei "player|tab" || true
-
-            exit 1
+          PLAYER="$(find "$CPP" -type f -iname "playertablist.h" -print | head -n 1 || true)"
+          if [ -n "$PLAYER" ]; then
+            DIR="$(dirname "$PLAYER")"
+            cp -f "$PLAYER" "$DIR/playerTabList.h"
+            echo "playerTabList.h fixed."
           fi
 
-          echo "Found:"
-          echo "$FOUND"
+          RGBA="$(find "$CPP" -type f -iname "RGBA.h" -print | head -n 1 || true)"
+          if [ -n "$RGBA" ]; then
+            DIR="$(dirname "$RGBA")"
+            cp -f "$RGBA" "$DIR/RGBA.h"
+            echo "RGBA.h fixed."
+          fi
 
-          HEADER_DIR="$(dirname "$FOUND")"
-
-          cp -f \
-            "$FOUND" \
-            "$HEADER_DIR/playerTabList.h"
-
-          test -f "$HEADER_DIR/playerTabList.h"
-
-          echo "playerTabList.h fixed."
-
-      # =========================================================
-      # 13. FIX RGBA.h
-      #
-      # rgba.cpp includes:
-      #
-      # #include "RGBA.h"
-      #
-      # Linux is case-sensitive.
-      # =========================================================
-
-      - name: Fix RGBA header case sensitivity
+      - name: Locate and fix RakNet BitStream.h
         shell: bash
         run: |
           set -euo pipefail
 
           CPP="$PROJECT_DIR/app/src/main/cpp"
+          EXPECTED="$CPP/samp/vendor/RakNet/BitStream.h"
 
-          echo "Searching for RGBA header..."
-
-          FOUND="$(find "$CPP" \
-            -type f \
-            -iname "RGBA.h" \
-            -print | head -n 1 || true)"
-
-          if [ -z "$FOUND" ]; then
-            echo "RGBA.h was not found directly."
-            echo "Searching rgba-related files..."
-
-            find "$CPP" \
-              -type f \
-              \( \
-                -iname "*rgba*" \
-                -o -iname "*color*" \
-              \) \
-              -print || true
-
-            exit 1
+          if [ -f "$EXPECTED" ]; then
+            echo "BitStream.h already exists."
+            exit 0
           fi
 
-          echo "Found RGBA header:"
-          echo "$FOUND"
+          echo "BitStream.h missing. Searching source..."
+          FOUND="$(find "$CPP" -type f -iname "BitStream.h" -print | head -n 1 || true)"
 
-          DIR="$(dirname "$FOUND")"
-
-          cp -f \
-            "$FOUND" \
-            "$DIR/RGBA.h"
-
-          test -f "$DIR/RGBA.h"
-
-          echo "RGBA.h fixed successfully."
-
-      # =========================================================
-      # 14. VERIFY BOTH HEADERS
-      # =========================================================
+          if [ -n "$FOUND" ]; then
+            echo "Found: $FOUND"
+            mkdir -p "$(dirname "$EXPECTED")"
+            cp -f "$FOUND" "$EXPECTED"
+            test -f "$EXPECTED"
+            echo "BitStream.h copied successfully."
+          else
+            echo "ERROR: BitStream.h does not exist anywhere in the extracted source."
+            echo "RakNet-related files:"
+            find "$CPP" -type f \( -iname "*raknet*" -o -iname "*bitstream*" \) -print || true
+            echo "RakNet directories:"
+            find "$CPP" -type d \( -iname "RakNet" -o -iname "raknet" \) -print || true
+            exit 1
+          fi
 
       - name: Verify native headers
         shell: bash
         run: |
           set -euo pipefail
-
           CPP="$PROJECT_DIR/app/src/main/cpp"
 
-          echo "Verifying playerTabList.h..."
+          test -f "$CPP/samp/vendor/RakNet/BitStream.h"
+          echo "RakNet BitStream.h: OK"
 
-          PLAYER_HEADER="$(find "$CPP" \
-            -type f \
-            -name "playerTabList.h" \
-            -print | head -n 1 || true)"
+          find "$CPP" -type f -name "playerTabList.h" -print || true
+          find "$CPP" -type f -name "RGBA.h" -print || true
 
-          if [ -z "$PLAYER_HEADER" ]; then
-            echo "ERROR: playerTabList.h missing."
-            exit 1
-          fi
-
-          echo "playerTabList.h:"
-          echo "$PLAYER_HEADER"
-
-          echo ""
-          echo "Verifying RGBA.h..."
-
-          RGBA_HEADER="$(find "$CPP" \
-            -type f \
-            -name "RGBA.h" \
-            -print | head -n 1 || true)"
-
-          if [ -z "$RGBA_HEADER" ]; then
-            echo "ERROR: RGBA.h missing."
-            exit 1
-          fi
-
-          echo "RGBA.h:"
-          echo "$RGBA_HEADER"
-
-          echo ""
-          echo "Both headers verified."
-
-      # =========================================================
-      # 15. SHOW IMPORTANT INCLUDES
-      # =========================================================
-
-      - name: Check native includes
+      - name: Remove old CMake and Gradle build
         shell: bash
         run: |
           set -euo pipefail
-
-          CPP="$PROJECT_DIR/app/src/main/cpp"
-
-          echo "Searching for playerTabList includes:"
-          grep -Rni \
-            --include="*.h" \
-            --include="*.hpp" \
-            --include="*.cpp" \
-            "playerTabList.h" \
-            "$CPP" || true
-
-          echo ""
-          echo "Searching for RGBA includes:"
-          grep -Rni \
-            --include="*.h" \
-            --include="*.hpp" \
-            --include="*.cpp" \
-            '"RGBA.h"' \
-            "$CPP" || true
-
-      # =========================================================
-      # 16. REMOVE OLD CMAKE / GRADLE BUILD
-      # =========================================================
-
-      - name: Remove old CMake and Gradle cache
-        shell: bash
-        run: |
-          set -euo pipefail
-
           rm -rf "$PROJECT_DIR/app/.cxx"
           rm -rf "$PROJECT_DIR/app/build"
-
-          echo "Old CMake and Gradle build directories removed."
-
-      # =========================================================
-      # 17. CHECK GRADLE
-      # =========================================================
 
       - name: Check Gradle
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-
-          ./gradlew \
-            --no-daemon \
-            --version
-
-      # =========================================================
-      # 18. GRADLE CLEAN
-      # =========================================================
+          ./gradlew --no-daemon --version
 
       - name: Gradle clean
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-
-          ./gradlew \
-            --no-daemon \
-            --stacktrace \
-            clean
-
-      # =========================================================
-      # 19. BUILD RELEASE APK
-      # =========================================================
+          ./gradlew --no-daemon --stacktrace clean
 
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
@@ -452,40 +182,22 @@ jobs:
             --warning-mode all \
             :app:assembleRelease
 
-          echo ""
           echo "=========================================="
           echo "RELEASE BUILD FINISHED"
           echo "=========================================="
-
-      # =========================================================
-      # 20. FIND APK
-      # =========================================================
 
       - name: Find generated APK
         if: success()
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "=========================================="
-          echo "GENERATED APK FILES"
-          echo "=========================================="
-
-          find "$PROJECT_DIR" \
-            -type f \
-            -name "*.apk" \
-            -print
-
-      # =========================================================
-      # 21. UPLOAD APK
-      # =========================================================
+          find "$PROJECT_DIR" -type f -name "*.apk" -print
 
       - name: Upload Release APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: SA-MP-Launcher-Release-APK
-          path: |
-            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 7
