@@ -20,30 +20,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "=========================================="
-          echo "DEXIN MOBILE - SOURCE PARTS"
-          echo "=========================================="
-
           P1="$(find . -maxdepth 1 -type f -name 'sampstable_github_readyPart1*.zip' -print | sort | head -n 1 || true)"
           P2="$(find . -maxdepth 1 -type f -name 'sampstable_github_readyPart2*.zip' -print | sort | head -n 1 || true)"
           P3="$(find . -maxdepth 1 -type f -name 'sampstable_github_readyPart3*.zip' -print | sort | head -n 1 || true)"
-
           [ -n "$P1" ] || { echo "ERROR: Part 1 not found"; exit 1; }
           [ -n "$P2" ] || { echo "ERROR: Part 2 not found"; exit 1; }
           [ -n "$P3" ] || { echo "ERROR: Part 3 not found"; exit 1; }
-
-          P1="${P1#./}"
-          P2="${P2#./}"
-          P3="${P3#./}"
-
-          echo "FOUND: $P1"
-          echo "FOUND: $P2"
-          echo "FOUND: $P3"
-
-          echo "Part sizes:"
+          P1="${P1#./}"; P2="${P2#./}"; P3="${P3#./}"
+          echo "FOUND: $P1"; echo "FOUND: $P2"; echo "FOUND: $P3"
           stat -c '%n = %s bytes' "$P1" "$P2" "$P3"
-
           echo "P1=$P1" >> "$GITHUB_ENV"
           echo "P2=$P2" >> "$GITHUB_ENV"
           echo "P3=$P3" >> "$GITHUB_ENV"
@@ -52,72 +37,36 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "=========================================="
-          echo "REASSEMBLING BINARY SPLIT ZIP"
-          echo "=========================================="
-
-          rm -f sampstable_github_ready.zip
-
           cat "$P1" "$P2" "$P3" > sampstable_github_ready.zip
-
-          echo "Combined file:"
           stat -c '%n = %s bytes' sampstable_github_ready.zip
-
-          echo "Testing ZIP integrity..."
           unzip -t sampstable_github_ready.zip
-
           echo "ZIP INTEGRITY: PASSED"
 
       - name: "04 - Extract source"
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf _source
           mkdir -p _source
-
           unzip -q sampstable_github_ready.zip -d _source
-
-          echo "Source extracted successfully."
 
       - name: "05 - Locate Gradle project"
         shell: bash
         run: |
           set -euo pipefail
-
           GRADLEW="$(find _source -type f -name gradlew -print | head -n 1 || true)"
-
-          if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew not found."
-            find _source -maxdepth 4 -type f \( -name 'settings.gradle*' -o -name 'build.gradle*' \) -print || true
-            exit 1
-          fi
-
+          [ -n "$GRADLEW" ] || { echo "ERROR: gradlew not found"; exit 1; }
           PROJECT_DIR="$(dirname "$GRADLEW")"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
           echo "Gradle project: $PROJECT_DIR"
 
       - name: "06 - Fix Linux line endings"
         shell: bash
         run: |
           set -euo pipefail
-
           sed -i 's/\r$//' "$PROJECT_DIR/gradlew"
-
-          find "$PROJECT_DIR" -type f \( \
-            -name '*.sh' -o \
-            -name '*.gradle' -o \
-            -name '*.gradle.kts' -o \
-            -name '*.properties' -o \
-            -name '*.xml' -o \
-            -name '*.cmake' -o \
-            -name 'CMakeLists.txt' \
-          \) -exec sed -i 's/\r$//' {} \;
-
+          find "$PROJECT_DIR" -type f \( -name '*.sh' -o -name '*.gradle' -o -name '*.gradle.kts' -o -name '*.properties' -o -name '*.xml' -o -name '*.cmake' -o -name 'CMakeLists.txt' \) -exec sed -i 's/\r$//' {} \;
           chmod +x "$PROJECT_DIR/gradlew"
-          echo "Line endings and permissions fixed."
 
       - name: "07 - Set up JDK 17"
         uses: actions/setup-java@v4
@@ -133,126 +82,103 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.2.11394342" "cmake;3.22.1"
 
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0" \
-            "ndk;26.2.11394342" \
-            "cmake;3.22.1"
-
-          echo "Android SDK components installed."
-
-      - name: "10 - Check native source"
+      - name: "10 - Verify native source"
         shell: bash
         run: |
           set -euo pipefail
-
           CPP="$PROJECT_DIR/app/src/main/cpp"
+          [ -d "$CPP" ] || { echo "ERROR: Native source not found: $CPP"; exit 1; }
 
-          if [ ! -d "$CPP" ]; then
-            echo "ERROR: Native source directory not found: $CPP"
-            exit 1
-          fi
-
-          echo "Native source found: $CPP"
-
-      - name: "11 - Fix playerTabList header case"
+      - name: "11 - Fix case-sensitive native headers"
         shell: bash
         run: |
           set -euo pipefail
-
           CPP="$PROJECT_DIR/app/src/main/cpp"
+
           PLAYER="$(find "$CPP" -type f -iname 'playertablist.h' -print | head -n 1 || true)"
-
           if [ -n "$PLAYER" ]; then
-            DIR="$(dirname "$PLAYER")"
-            cp -f "$PLAYER" "$DIR/playerTabList.h"
-            echo "playerTabList.h fixed: $DIR/playerTabList.h"
-          else
-            echo "playerTabList.h source not found; continuing."
+            cp -f "$PLAYER" "$(dirname "$PLAYER")/playerTabList.h"
           fi
 
-      - name: "12 - Fix RGBA header case"
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          CPP="$PROJECT_DIR/app/src/main/cpp"
           RGBA="$(find "$CPP" -type f -iname 'RGBA.h' -print | head -n 1 || true)"
-
           if [ -n "$RGBA" ]; then
-            DIR="$(dirname "$RGBA")"
-            cp -f "$RGBA" "$DIR/RGBA.h"
-            echo "RGBA.h fixed: $DIR/RGBA.h"
-          else
-            echo "RGBA.h source not found; continuing."
+            cp -f "$RGBA" "$(dirname "$RGBA")/RGBA.h"
           fi
 
-      - name: "13 - Fix RakNet case sensitivity"
+      - name: "12 - Fix RakNet directory and BitStream"
         shell: bash
         run: |
           set -euo pipefail
 
           CPP="$PROJECT_DIR/app/src/main/cpp"
           VENDOR="$CPP/samp/vendor"
+          RAKNET="$VENDOR/RakNet"
 
-          if [ ! -d "$VENDOR" ]; then
-            echo "RakNet vendor directory not found; continuing."
-            exit 0
+          echo "Searching for RakNet..."
+          mkdir -p "$VENDOR"
+
+          OLD_RAKNET="$(find "$VENDOR" -maxdepth 1 -type d -iname 'raknet' -print | head -n 1 || true)"
+          if [ -n "$OLD_RAKNET" ] && [ "$OLD_RAKNET" != "$RAKNET" ]; then
+            if [ ! -d "$RAKNET" ]; then
+              mv "$OLD_RAKNET" "$RAKNET"
+            fi
           fi
 
-          if [ -d "$VENDOR/raknet" ] && [ ! -d "$VENDOR/RakNet" ]; then
-            mv "$VENDOR/raknet" "$VENDOR/RakNet"
-            echo "Renamed raknet -> RakNet"
+          mkdir -p "$RAKNET"
+
+          TARGET="$RAKNET/BitStream.h"
+
+          if [ ! -f "$TARGET" ]; then
+            echo "BitStream.h not in expected location. Searching entire C++ tree..."
+
+            FOUND="$(find "$CPP" -type f \( -iname 'BitStream.h' -o -iname 'bitstream.h' -o -iname 'BitStream.hpp' \) -print | head -n 1 || true)"
+
+            if [ -n "$FOUND" ]; then
+              echo "Found BitStream source: $FOUND"
+              cp -f "$FOUND" "$TARGET"
+            fi
           fi
 
-          if [ -d "$VENDOR/RakNet" ]; then
-            find "$CPP" -type f \( \
-              -name '*.cpp' -o \
-              -name '*.c' -o \
-              -name '*.h' -o \
-              -name '*.hpp' \
-            \) -print0 | xargs -0 -r sed -i \
-              -e 's|vendor/raknet/|vendor/RakNet/|g' \
-              -e 's|"raknet/|"RakNet/|g' \
-              -e "s|'raknet/|'RakNet/|g"
-
-            echo "RakNet include paths fixed."
-          else
-            echo "RakNet directory not found; continuing."
+          if [ ! -f "$TARGET" ]; then
+            echo "ERROR: Required RakNet header is missing: $TARGET"
+            echo "All BitStream/RakNet candidates found:"
+            find "$CPP" -type f | grep -Ei 'bitstream|raknet' | head -100 || true
+            exit 1
           fi
+
+          echo "BitStream.h verified: $TARGET"
+
+          find "$CPP" -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -print0 | xargs -0 -r sed -i \
+            -e 's|vendor/raknet/|vendor/RakNet/|g' \
+            -e 's|"raknet/|"RakNet/|g' \
+            -e "s|'raknet/|'RakNet/|g"
+
+      - name: "13 - Verify required headers and includes"
+        shell: bash
+        run: |
+          set -euo pipefail
+          CPP="$PROJECT_DIR/app/src/main/cpp"
+          test -f "$CPP/samp/vendor/RakNet/BitStream.h"
+          echo "OK: RakNet/BitStream.h"
+          find "$CPP" -type f \( -name '*.cpp' -o -name '*.h' \) -print0 | xargs -0 grep -n 'vendor/RakNet/BitStream.h\|../vendor/RakNet/BitStream.h' 2>/dev/null || true
 
       - name: "14 - Verify Dexin Mobile server target"
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "=========================================="
-          echo "DEXIN MOBILE SERVER TARGET"
-          echo "=========================================="
-          echo "5.57.37.215:7777"
-
-          grep -Rni -E '5\.57\.37\.215|7777' \
-            "$PROJECT_DIR/app/src/main" \
-            2>/dev/null | head -50 || true
-
-          echo "Server target check completed."
+          echo "Dexin Mobile server: 5.57.37.215:7777"
+          grep -Rni -E '5\.57\.37\.215|7777' "$PROJECT_DIR/app/src/main" 2>/dev/null | head -50 || true
 
       - name: "15 - Patch optional build settings"
         shell: bash
         run: |
           set -euo pipefail
-
           BG="$PROJECT_DIR/app/build.gradle"
-
           if [ -f "$BG" ]; then
             sed -i 's/nativeSymbolUploadEnabled[[:space:]]\+true/nativeSymbolUploadEnabled false/g' "$BG" || true
-            echo "build.gradle checked."
-          else
-            echo "app/build.gradle not found; Gradle Kotlin DSL or another layout may be used."
           fi
 
       - name: "16 - Clean previous build"
@@ -260,7 +186,6 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf "$PROJECT_DIR/app/.cxx" "$PROJECT_DIR/app/build"
-          echo "Previous build directories removed."
 
       - name: "17 - Gradle version"
         working-directory: ${{ env.PROJECT_DIR }}
@@ -282,22 +207,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "=========================================="
           echo "DEXIN MOBILE APK BUILD START"
-          echo "=========================================="
-
-          ./gradlew \
-            --no-daemon \
-            --stacktrace \
-            --warning-mode all \
-            --build-cache \
-            :app:assembleRelease \
-            2>&1 | tee /tmp/gradle-build.log
-
-          echo "=========================================="
+          ./gradlew --no-daemon --stacktrace --warning-mode all --build-cache :app:assembleRelease 2>&1 | tee /tmp/gradle-build.log
           echo "DEXIN MOBILE APK BUILD FINISHED"
-          echo "=========================================="
 
       - name: "20 - Upload build log on failure"
         if: failure()
@@ -312,16 +224,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "=========================================="
-          echo "GENERATED APK FILES"
-          echo "=========================================="
-
           find "$PROJECT_DIR" -type f -name '*.apk' -print
-
           APK_DIR="$PROJECT_DIR/app/build/outputs/apk/release"
-          [ -d "$APK_DIR" ] || { echo "ERROR: Release APK directory not found."; exit 1; }
-
+          test -d "$APK_DIR"
           ls -lh "$APK_DIR"
 
       - name: "22 - Upload Release APK"
