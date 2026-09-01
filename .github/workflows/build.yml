@@ -82,56 +82,50 @@ jobs:
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.2.11394342" "cmake;3.22.1"
 
-      - name: Fix Linux case-sensitive headers and folders
+      - name: Fix Linux case-sensitive headers
         shell: bash
         run: |
           set -euo pipefail
           CPP="$PROJECT_DIR/app/src/main/cpp"
 
-          # Fix playerTabList.h
-          PLAYER="$(find "$CPP" -type f -iname "playertablist.h" -print | head -n 1 || true)"
+          # playerTabList.h
+          PLAYER="$(find "$CPP" -type f -iname "playertablist.h" | head -n 1 || true)"
           if [ -n "$PLAYER" ]; then
             DIR="$(dirname "$PLAYER")"
             cp -f "$PLAYER" "$DIR/playerTabList.h"
-            echo "playerTabList.h fixed."
+            echo "playerTabList.h fixed"
           fi
 
-          # Fix RGBA.h
-          RGBA="$(find "$CPP" -type f -iname "RGBA.h" -print | head -n 1 || true)"
+          # RGBA.h
+          RGBA="$(find "$CPP" -type f -iname "RGBA.h" | head -n 1 || true)"
           if [ -n "$RGBA" ]; then
             DIR="$(dirname "$RGBA")"
             cp -f "$RGBA" "$DIR/RGBA.h"
-            echo "RGBA.h fixed."
+            echo "RGBA.h fixed"
           fi
 
-          # Fix raknet -> RakNet (case sensitivity)
-          RAKNET_DIR="$(find "$CPP" -type d -iname "raknet" -print | head -n 1 || true)"
-          if [ -n "$RAKNET_DIR" ]; then
-            PARENT="$(dirname "$RAKNET_DIR")"
-            if [ "$(basename "$RAKNET_DIR")" != "RakNet" ]; then
-              echo "Renaming $RAKNET_DIR -> $PARENT/RakNet"
-              mv "$RAKNET_DIR" "$PARENT/RakNet" || {
-                mkdir -p "$PARENT/RakNet"
-                cp -a "$RAKNET_DIR/." "$PARENT/RakNet/"
-                ln -sfn RakNet "$RAKNET_DIR" || true
-              }
-            fi
-          fi
-
-          # Ensure BitStream.h exists in expected path
+          # BitStream.h - فقط کپی به مسیر با حروف بزرگ (پوشه اصلی را تغییر نده)
           EXPECTED="$CPP/samp/vendor/RakNet/BitStream.h"
           if [ ! -f "$EXPECTED" ]; then
-            FOUND="$(find "$CPP" -type f -iname "BitStream.h" -print | head -n 1 || true)"
+            FOUND="$(find "$CPP" -type f -iname "BitStream.h" | head -n 1 || true)"
             if [ -n "$FOUND" ]; then
               mkdir -p "$(dirname "$EXPECTED")"
               cp -f "$FOUND" "$EXPECTED"
-              echo "BitStream.h copied to $EXPECTED"
-            else
-              echo "WARNING: BitStream.h not found"
+              echo "BitStream.h copied to RakNet/"
             fi
           fi
 
-          test -f "$EXPECTED" && echo "RakNet BitStream.h: OK" || echo "RakNet BitStream.h: MISSING"
+          # اگر پوشه raknet وجود دارد، یک symlink با حروف بزرگ هم بساز
+          RAKNET_LOWER="$(find "$CPP" -type d -iname "raknet" | head -n 1 || true)"
+          if [ -n "$RAKNET_LOWER" ]; then
+            PARENT="$(dirname "$RAKNET_LOWER")"
+            if [ ! -e "$PARENT/RakNet" ]; then
+              ln -s "$(basename "$RAKNET_LOWER")" "$PARENT/RakNet"
+              echo "Symlink RakNet created"
+            fi
+          fi
+
+          ls -la "$CPP/samp/vendor/" || true
 
       - name: Create temporary keystore for CI
         shell: bash
@@ -149,22 +143,19 @@ jobs:
               -keypass 'EDrp131211aA!!pass' \
               -dname "CN=SA-MP CI, OU=CI, O=SA-MP, L=City, ST=State, C=US" \
               -noprompt
-            echo "Temporary keystore created: $KEYSTORE"
-          else
-            echo "Keystore already exists"
+            echo "Temporary keystore created"
           fi
           ls -lh "$KEYSTORE"
 
-      - name: Patch build.gradle for CI
+      - name: Patch build.gradle
         shell: bash
         run: |
           set -euo pipefail
           BG="$PROJECT_DIR/app/build.gradle"
-          grep -n "keystore_playmarket2" "$BG" || true
           sed -i 's/nativeSymbolUploadEnabled true/nativeSymbolUploadEnabled false/g' "$BG" || true
           echo "build.gradle patched"
 
-      - name: Remove old CMake and Gradle build
+      - name: Remove old build dirs
         shell: bash
         run: |
           set -euo pipefail
@@ -190,20 +181,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           echo "=========================================="
           echo "STARTING RELEASE APK BUILD"
           echo "=========================================="
-
           ./gradlew \
             --no-daemon \
             --stacktrace \
             --warning-mode all \
-            :app:assembleRelease
-
+            :app:assembleRelease 2>&1 | tee /tmp/gradle-build.log
           echo "=========================================="
           echo "RELEASE BUILD FINISHED"
           echo "=========================================="
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-build-log
+          path: /tmp/gradle-build.log
+          retention-days: 3
 
       - name: Find generated APK
         if: success()
