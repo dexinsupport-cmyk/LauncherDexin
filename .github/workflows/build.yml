@@ -20,23 +20,32 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo "Checking source parts..."
           test -f sampstable_DexinMobile_updatedPart1.zip
           test -f sampstable_DexinMobile_updatedPart2.zip
           test -f sampstable_DexinMobile_updatedPart3.zip
           ls -lh sampstable_DexinMobile_updatedPart*.zip
 
-      - name: Reassemble original ZIP
+      - name: Reassemble source ZIP from parts
         shell: bash
         run: |
           set -euo pipefail
-          cat sampstable_DexinMobile_updatedPart1.zip sampstable_DexinMobile_updatedPart2.zip sampstable_DexinMobile_updatedPart3.zip > full_source.zip
+          echo "Reassembling parts in order: Part1 -> Part2 -> Part3"
+          rm -f full_source.zip
+          cat \
+            sampstable_DexinMobile_updatedPart1.zip \
+            sampstable_DexinMobile_updatedPart2.zip \
+            sampstable_DexinMobile_updatedPart3.zip \
+            > full_source.zip
           ls -lh full_source.zip
 
       - name: Verify reconstructed ZIP
         shell: bash
         run: |
           set -euo pipefail
+          echo "Testing reconstructed ZIP..."
           unzip -t full_source.zip
+          echo "ZIP TEST PASSED"
 
       - name: Extract source
         shell: bash
@@ -61,9 +70,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo "Fixing CRLF line endings..."
           sed -i 's/\r$//' "$PROJECT_DIR/gradlew"
-          find "\( PROJECT_DIR" -type f \( -name "*.sh" -o -name "*.gradle" -o -name "*.gradle.kts" -o -name "*.properties" -o -name "*.xml" -o -name "*.cmake" -o -name "CMakeLists.txt" \) -exec sed -i 's/\r \)//' {} \; || true
+          find "$PROJECT_DIR" \
+            -type f \
+            \( \
+              -name "*.sh" \
+              -o -name "*.gradle" \
+              -o -name "*.gradle.kts" \
+              -o -name "*.properties" \
+              -o -name "*.xml" \
+              -o -name "*.cmake" \
+              -o -name "CMakeLists.txt" \
+            \) \
+            -exec sed -i 's/\r$//' {} \;
           chmod +x "$PROJECT_DIR/gradlew"
+          echo "Line endings fixed."
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -80,7 +102,12 @@ jobs:
         run: |
           set -euo pipefail
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.2.11394342" "cmake;3.22.1"
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "ndk;26.2.11394342" \
+            "cmake;3.22.1"
 
       - name: Fix Linux case-sensitive headers (RakNet)
         shell: bash
@@ -109,6 +136,7 @@ jobs:
             ls -la "$VENDOR" || true
             exit 1
           fi
+
           echo "Found RakNet dir: $RAKNET_DIR"
 
           if [ "$(basename "$RAKNET_DIR")" = "raknet" ]; then
@@ -116,16 +144,29 @@ jobs:
             echo "Renamed raknet -> RakNet"
           fi
 
-          echo "Patching includes: raknet -> RakNet"
           find "$CPP" -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.h" -o -name "*.hpp" \) -print0 | \
-            xargs -0 sed -i 's|vendor/raknet/|vendor/RakNet/|g' || true
-          find "$CPP" -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.h" -o -name "*.hpp" \) -print0 | \
-            xargs -0 sed -i 's|"raknet/|"RakNet/|g' || true
-          find "$CPP" -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.h" -o -name "*.hpp" \) -print0 | \
-            xargs -0 sed -i "s|'raknet/|'RakNet/|g" || true
+            xargs -0 -r sed -i \
+              -e 's|vendor/raknet/|vendor/RakNet/|g' \
+              -e 's|vendor/RakNet/raknet/|vendor/RakNet/|g' \
+              -e 's|"raknet/|"RakNet/|g' \
+              -e "s|'raknet/|'RakNet/|g"
 
-          echo "Contents of RakNet:"
-          ls -la "$VENDOR/RakNet/" | head -30 || true
+          echo "Checking BitStream.h..."
+          EXPECTED="$VENDOR/RakNet/BitStream.h"
+
+          if [ ! -f "$EXPECTED" ]; then
+            BITSTREAM="$(find "$CPP" -type f -iname "BitStream.h" | head -n 1 || true)"
+            if [ -n "$BITSTREAM" ]; then
+              cp -f "$BITSTREAM" "$EXPECTED"
+            else
+              echo "ERROR: BitStream.h not found anywhere in source."
+              find "$CPP" -type f \( -iname "*bitstream*" -o -iname "*raknet*" \) -print || true
+              exit 1
+            fi
+          fi
+
+          test -f "$EXPECTED"
+          echo "BitStream.h OK"
 
       - name: Create temporary keystore for CI
         shell: bash
@@ -143,17 +184,17 @@ jobs:
               -keypass 'EDrp131211aA!!pass' \
               -dname "CN=SA-MP CI, OU=CI, O=SA-MP, L=City, ST=State, C=US" \
               -noprompt
-            echo "Temporary keystore created"
           fi
-          ls -lh "$KEYSTORE"
+          test -f "$KEYSTORE"
 
       - name: Patch build.gradle
         shell: bash
         run: |
           set -euo pipefail
           BG="$PROJECT_DIR/app/build.gradle"
-          sed -i 's/nativeSymbolUploadEnabled true/nativeSymbolUploadEnabled false/g' "$BG" || true
-          echo "build.gradle patched"
+          if [ -f "$BG" ]; then
+            sed -i 's/nativeSymbolUploadEnabled true/nativeSymbolUploadEnabled false/g' "$BG" || true
+          fi
 
       - name: Remove old build dirs
         shell: bash
@@ -174,7 +215,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./gradlew --no-daemon --stacktrace clean || true
+          ./gradlew --no-daemon --stacktrace clean
 
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
@@ -199,7 +240,7 @@ jobs:
         with:
           name: gradle-build-log
           path: /tmp/gradle-build.log
-          retention-days: 3
+          retention-days: 7
 
       - name: Find generated APK
         if: success()
@@ -207,7 +248,8 @@ jobs:
         run: |
           set -euo pipefail
           find "$PROJECT_DIR" -type f -name "*.apk" -print
-          ls -lh "$PROJECT_DIR/app/build/outputs/apk/release/" || true
+          test -d "$PROJECT_DIR/app/build/outputs/apk/release"
+          ls -lh "$PROJECT_DIR/app/build/outputs/apk/release/"
 
       - name: Upload Release APK
         if: success()
