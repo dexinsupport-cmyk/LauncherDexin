@@ -89,6 +89,7 @@ jobs:
           CPP="$PROJECT_DIR/app/src/main/cpp"
           VENDOR="$CPP/samp/vendor"
 
+          # playerTabList.h
           PLAYER="$(find "$CPP" -type f -iname "playertablist.h" | head -n 1 || true)"
           if [ -n "$PLAYER" ]; then
             DIR="$(dirname "$PLAYER")"
@@ -96,6 +97,7 @@ jobs:
             echo "playerTabList.h fixed"
           fi
 
+          # RGBA.h
           RGBA="$(find "$CPP" -type f -iname "RGBA.h" | head -n 1 || true)"
           if [ -n "$RGBA" ]; then
             DIR="$(dirname "$RGBA")"
@@ -103,44 +105,32 @@ jobs:
             echo "RGBA.h fixed"
           fi
 
-          # پیدا کردن پوشه واقعی raknet (حروف کوچک)
-          RAKNET_DIR="$(find "$VENDOR" -maxdepth 1 -type d -iname "raknet" | head -n 1 || true)"
+          # پیدا کردن پوشه raknet
+          RAKNET_DIR="$(find "$VENDOR" -maxdepth 1 -type d \( -name "raknet" -o -name "RakNet" \) | head -n 1 || true)"
           if [ -z "$RAKNET_DIR" ]; then
-            echo "ERROR: raknet directory not found"
+            echo "ERROR: raknet/RakNet directory not found"
             ls -la "$VENDOR" || true
             exit 1
           fi
+          echo "Found RakNet dir: $RAKNET_DIR"
 
-          echo "Found: $RAKNET_DIR"
-          BASENAME="$(basename "$RAKNET_DIR")"
-
-          # اگر فقط حروف کوچک است، symlink با حروف بزرگ بساز
-          # اگر فقط حروف بزرگ است، symlink با حروف کوچک بساز
-          # هدف: هر دو نام raknet و RakNet موجود باشند بدون کپی فایل‌ها
-          cd "$VENDOR"
-          if [ "$BASENAME" = "raknet" ]; then
-            if [ ! -e "RakNet" ]; then
-              ln -s raknet RakNet
-              echo "Created symlink: RakNet -> raknet"
-            fi
-          elif [ "$BASENAME" = "RakNet" ]; then
-            if [ ! -e "raknet" ]; then
-              ln -s RakNet raknet
-              echo "Created symlink: raknet -> RakNet"
-            fi
-          else
-            # هر نام دیگری
-            if [ ! -e "RakNet" ]; then
-              ln -s "$BASENAME" RakNet
-            fi
-            if [ ! -e "raknet" ]; then
-              ln -s "$BASENAME" raknet
-            fi
+          # تغییر نام به RakNet اگر لازم باشد
+          if [ "$(basename "$RAKNET_DIR")" = "raknet" ]; then
+            mv "$RAKNET_DIR" "$VENDOR/RakNet"
+            echo "Renamed raknet -> RakNet"
           fi
 
-          test -f "$VENDOR/RakNet/RakClient.h" && echo "RakNet/RakClient.h: OK" || echo "RakNet/RakClient.h: MISSING"
-          test -f "$VENDOR/raknet/RakClientInterface.h" && echo "raknet/RakClientInterface.h: OK" || echo "raknet/RakClientInterface.h: MISSING"
-          ls -la "$VENDOR/" | head -20
+          # همه includeهای raknet (حروف کوچک) را به RakNet تغییر بده
+          echo "Patching includes: raknet -> RakNet"
+          find "$CPP" -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.h" -o -name "*.hpp" \) -print0 | \
+            xargs -0 sed -i 's|vendor/raknet/|vendor/RakNet/|g' || true
+          find "$CPP" -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.h" -o -name "*.hpp" \) -print0 | \
+            xargs -0 sed -i 's|"raknet/|"RakNet/|g' || true
+          find "$CPP" -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.h" -o -name "*.hpp" \) -print0 | \
+            xargs -0 sed -i "s|'raknet/|'RakNet/|g" || true
+
+          echo "Contents of RakNet:"
+          ls -la "$VENDOR/RakNet/" | head -30
 
       - name: Create temporary keystore for CI
         shell: bash
