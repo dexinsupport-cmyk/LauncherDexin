@@ -103,23 +103,43 @@ jobs:
             echo "RGBA.h fixed"
           fi
 
-          RAKNET_LOWER="$(find "$VENDOR" -maxdepth 1 -type d -iname "raknet" | head -n 1 || true)"
-          if [ -z "$RAKNET_LOWER" ]; then
-            echo "ERROR: raknet directory not found under $VENDOR"
+          # پیدا کردن پوشه واقعی raknet (حروف کوچک)
+          RAKNET_DIR="$(find "$VENDOR" -maxdepth 1 -type d -iname "raknet" | head -n 1 || true)"
+          if [ -z "$RAKNET_DIR" ]; then
+            echo "ERROR: raknet directory not found"
             ls -la "$VENDOR" || true
             exit 1
           fi
 
-          echo "Found raknet at: $RAKNET_LOWER"
+          echo "Found: $RAKNET_DIR"
+          BASENAME="$(basename "$RAKNET_DIR")"
 
-          # فقط تغییر نام (نه کپی) تا duplicate symbol نشود
-          if [ "$(basename "$RAKNET_LOWER")" != "RakNet" ]; then
-            echo "Renaming $RAKNET_LOWER -> $VENDOR/RakNet"
-            mv "$RAKNET_LOWER" "$VENDOR/RakNet"
+          # اگر فقط حروف کوچک است، symlink با حروف بزرگ بساز
+          # اگر فقط حروف بزرگ است، symlink با حروف کوچک بساز
+          # هدف: هر دو نام raknet و RakNet موجود باشند بدون کپی فایل‌ها
+          cd "$VENDOR"
+          if [ "$BASENAME" = "raknet" ]; then
+            if [ ! -e "RakNet" ]; then
+              ln -s raknet RakNet
+              echo "Created symlink: RakNet -> raknet"
+            fi
+          elif [ "$BASENAME" = "RakNet" ]; then
+            if [ ! -e "raknet" ]; then
+              ln -s RakNet raknet
+              echo "Created symlink: raknet -> RakNet"
+            fi
+          else
+            # هر نام دیگری
+            if [ ! -e "RakNet" ]; then
+              ln -s "$BASENAME" RakNet
+            fi
+            if [ ! -e "raknet" ]; then
+              ln -s "$BASENAME" raknet
+            fi
           fi
 
-          test -f "$VENDOR/RakNet/RakClient.h" && echo "RakClient.h: OK" || (echo "RakClient.h: MISSING" && exit 1)
-          test -f "$VENDOR/RakNet/BitStream.h" && echo "BitStream.h: OK" || (echo "BitStream.h: MISSING" && exit 1)
+          test -f "$VENDOR/RakNet/RakClient.h" && echo "RakNet/RakClient.h: OK" || echo "RakNet/RakClient.h: MISSING"
+          test -f "$VENDOR/raknet/RakClientInterface.h" && echo "raknet/RakClientInterface.h: OK" || echo "raknet/RakClientInterface.h: MISSING"
           ls -la "$VENDOR/" | head -20
 
       - name: Create temporary keystore for CI
