@@ -112,13 +112,14 @@ jobs:
 
           echo "Found raknet at: $RAKNET_LOWER"
 
-          if [ ! -d "$VENDOR/RakNet" ]; then
-            echo "Copying entire raknet -> RakNet"
-            cp -a "$RAKNET_LOWER" "$VENDOR/RakNet"
+          # فقط تغییر نام (نه کپی) تا duplicate symbol نشود
+          if [ "$(basename "$RAKNET_LOWER")" != "RakNet" ]; then
+            echo "Renaming $RAKNET_LOWER -> $VENDOR/RakNet"
+            mv "$RAKNET_LOWER" "$VENDOR/RakNet"
           fi
 
-          test -f "$VENDOR/RakNet/RakClient.h" && echo "RakClient.h: OK" || echo "RakClient.h: MISSING"
-          test -f "$VENDOR/RakNet/BitStream.h" && echo "BitStream.h: OK" || echo "BitStream.h: MISSING"
+          test -f "$VENDOR/RakNet/RakClient.h" && echo "RakClient.h: OK" || (echo "RakClient.h: MISSING" && exit 1)
+          test -f "$VENDOR/RakNet/BitStream.h" && echo "BitStream.h: OK" || (echo "BitStream.h: MISSING" && exit 1)
           ls -la "$VENDOR/" | head -20
 
       - name: Create temporary keystore for CI
