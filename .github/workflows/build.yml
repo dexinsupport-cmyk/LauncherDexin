@@ -82,13 +82,13 @@ jobs:
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.2.11394342" "cmake;3.22.1"
 
-      - name: Fix Linux case-sensitive headers
+      - name: Fix Linux case-sensitive headers (RakNet)
         shell: bash
         run: |
           set -euo pipefail
           CPP="$PROJECT_DIR/app/src/main/cpp"
+          VENDOR="$CPP/samp/vendor"
 
-          # playerTabList.h
           PLAYER="$(find "$CPP" -type f -iname "playertablist.h" | head -n 1 || true)"
           if [ -n "$PLAYER" ]; then
             DIR="$(dirname "$PLAYER")"
@@ -96,7 +96,6 @@ jobs:
             echo "playerTabList.h fixed"
           fi
 
-          # RGBA.h
           RGBA="$(find "$CPP" -type f -iname "RGBA.h" | head -n 1 || true)"
           if [ -n "$RGBA" ]; then
             DIR="$(dirname "$RGBA")"
@@ -104,28 +103,23 @@ jobs:
             echo "RGBA.h fixed"
           fi
 
-          # BitStream.h - فقط کپی به مسیر با حروف بزرگ (پوشه اصلی را تغییر نده)
-          EXPECTED="$CPP/samp/vendor/RakNet/BitStream.h"
-          if [ ! -f "$EXPECTED" ]; then
-            FOUND="$(find "$CPP" -type f -iname "BitStream.h" | head -n 1 || true)"
-            if [ -n "$FOUND" ]; then
-              mkdir -p "$(dirname "$EXPECTED")"
-              cp -f "$FOUND" "$EXPECTED"
-              echo "BitStream.h copied to RakNet/"
-            fi
+          RAKNET_LOWER="$(find "$VENDOR" -maxdepth 1 -type d -iname "raknet" | head -n 1 || true)"
+          if [ -z "$RAKNET_LOWER" ]; then
+            echo "ERROR: raknet directory not found under $VENDOR"
+            ls -la "$VENDOR" || true
+            exit 1
           fi
 
-          # اگر پوشه raknet وجود دارد، یک symlink با حروف بزرگ هم بساز
-          RAKNET_LOWER="$(find "$CPP" -type d -iname "raknet" | head -n 1 || true)"
-          if [ -n "$RAKNET_LOWER" ]; then
-            PARENT="$(dirname "$RAKNET_LOWER")"
-            if [ ! -e "$PARENT/RakNet" ]; then
-              ln -s "$(basename "$RAKNET_LOWER")" "$PARENT/RakNet"
-              echo "Symlink RakNet created"
-            fi
+          echo "Found raknet at: $RAKNET_LOWER"
+
+          if [ ! -d "$VENDOR/RakNet" ]; then
+            echo "Copying entire raknet -> RakNet"
+            cp -a "$RAKNET_LOWER" "$VENDOR/RakNet"
           fi
 
-          ls -la "$CPP/samp/vendor/" || true
+          test -f "$VENDOR/RakNet/RakClient.h" && echo "RakClient.h: OK" || echo "RakClient.h: MISSING"
+          test -f "$VENDOR/RakNet/BitStream.h" && echo "BitStream.h: OK" || echo "BitStream.h: MISSING"
+          ls -la "$VENDOR/" | head -20
 
       - name: Create temporary keystore for CI
         shell: bash
