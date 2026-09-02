@@ -18,22 +18,26 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          mapfile -t ALL < <(find . -maxdepth 2 -type f -name '*.zip' -print)
+
           mapfile -t PARTS < <(
-            printf '%s\n' "${ALL[@]}" |
-            awk '
-              match($0,/Part[0-9]+(-[^\/]*)?\.zip$/) {
-                s=substr($0,RSTART,RLENGTH); n=s; sub(/^Part/,"",n); sub(/-.*/,"",n); sub(/\.zip$/,"",n); print n "\t" $0
-              }
-            ' | sort -n -k1,1 | cut -f2-
+            find . -maxdepth 2 -type f -name '*.zip' -print0 |
+            while IFS= read -r -d '' f; do
+              b="$(basename "$f")"
+              if [[ "$b" =~ Part([0-9]+)(-[^/]*)?\.zip$ ]]; then
+                printf '%d\t%s\n' "${BASH_REMATCH[1]}" "$f"
+              fi
+            done | sort -n -k1,1 | cut -f2-
           )
+
           [ "${#PARTS[@]}" -gt 0 ] || { echo 'ERROR: no source Part*.zip files found'; exit 1; }
 
           expected=1
           for part in "${PARTS[@]}"; do
-            num="$(basename "$part" | sed -E 's/.*Part([0-9]+)(-[^/]*)?\.zip$/\1/')"
-            if [ "$num" != "$expected" ]; then
-              echo "ERROR: expected Part${expected}, found Part${num}: $(basename "$part")"
+            b="$(basename "$part")"
+            [[ "$b" =~ Part([0-9]+)(-[^/]*)?\.zip$ ]] || { echo "ERROR: invalid part filename: $b"; exit 1; }
+            num="${BASH_REMATCH[1]}"
+            if [ "$num" -ne "$expected" ]; then
+              echo "ERROR: expected Part${expected}, found Part${num}: $b"
               exit 1
             fi
             expected=$((expected+1))
@@ -41,11 +45,12 @@ jobs:
 
           echo "Found ${#PARTS[@]} source parts:"
           printf '  %s\n' "${PARTS[@]}"
+
           rm -f source.zip
           cat "${PARTS[@]}" > source.zip
           unzip -t source.zip
           rm -rf _source
-          mkdir _source
+          mkdir -p _source
           unzip -q source.zip -d _source
 
       - name: Locate Gradle project
@@ -83,19 +88,38 @@ jobs:
           K="$PROJECT_DIR/keystore_playmarket2.jks"
           P='DexinCI_2026_Release_Key!'
           rm -f "$K"
-          keytool -genkeypair -alias my-key-alias -keyalg RSA -keysize 2048 -validity 10000 -keystore "$K" -storepass "$P" -keypass "$P" -dname 'CN=Dexin Mobile, OU=Release, O=Dexin Mobile, L=Dexin, ST=NA, C=US' -noprompt
+          keytool -genkeypair -alias my-key-alias -keyalg RSA -keysize 2048 -validity 10000 \
+            -keystore "$K" -storepass "$P" -keypass "$P" \
+            -dname 'CN=Dexin Mobile, OU=Release, O=Dexin Mobile, L=Dexin, ST=NA, C=US' -noprompt
 
       - name: Fix native Linux case sensitivity
         shell: bash
         run: |
           set -euo pipefail
           C="$PROJECT_DIR/app/src/main/cpp"
-          P="$(find "$C" -type f -iname 'playertablist.h' -print -quit || true)"; [ -z "$P" ] || cp -f "$P" "$(dirname "$P")/playerTabList.h"
-          R="$(find "$C" -type f -iname 'RGBA.h' -print -quit || true)"; [ -z "$R" ] || cp -f "$R" "$(dirname "$R")/RGBA.h"
-          V="$C/samp/vendor"; RD="$(find "$V" -maxdepth 1 -type d -iname 'raknet' -print -quit || true)"
+          [ -d "$C" ] || { echo "ERROR: native source directory missing: $C"; exit 1; }
+
+          P="$(find "$C" -type f -iname 'playertablist.h' -print -quit || true)"
+          [ -z "$P" ] || cp -f "$P" "$(dirname "$P")/playerTabList.h"
+
+          R="$(find "$C" -type f -iname 'RGBA.h' -print -quit || true)"
+          [ -z "$R" ] || cp -f "$R" "$(dirname "$R")/RGBA.h"
+
+          V="$C/samp/vendor"
+          RD="$(find "$V" -maxdepth 1 -type d -iname 'raknet' -print -quit || true)"
           [ -n "$RD" ] || { echo 'ERROR: RakNet directory missing'; exit 1; }
-          find "$C" -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -print0 | xargs -0 -r sed -i -e 's|vendor/RakNet/|vendor/raknet/|g' -e 's|"RakNet/|"raknet/|g' -e 's|\.\./vendor/RakNet/|../vendor/raknet/|g'
-          for H in BitStream.h RakClientInterface.h RakClient.h; do F="$(find "$RD" -maxdepth 1 -type f -iname "$H" -print -quit || true)"; [ -n "$F" ] || { echo "ERROR: $H missing"; exit 1; }; [ "$(basename "$F")" = "$H" ] || cp -f "$F" "$RD/$H"; done
+
+          find "$C" -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -print0 |
+            xargs -0 -r sed -i \
+              -e 's|vendor/RakNet/|vendor/raknet/|g' \
+              -e 's|"RakNet/|"raknet/|g' \
+              -e 's|\.\./vendor/RakNet/|../vendor/raknet/|g'
+
+          for H in BitStream.h RakClientInterface.h RakClient.h; do
+            F="$(find "$RD" -maxdepth 1 -type f -iname "$H" -print -quit || true)"
+            [ -n "$F" ] || { echo "ERROR: $H missing"; exit 1; }
+            [ "$(basename "$F")" = "$H" ] || cp -f "$F" "$RD/$H"
+          done
 
       - name: Fix release signing configuration
         shell: bash
@@ -104,7 +128,9 @@ jobs:
           BG="$PROJECT_DIR/app/build.gradle"
           PASS='DexinCI_2026_Release_Key!'
           K="$PROJECT_DIR/keystore_playmarket2.jks"
-          test -f "$BG"; test -f "$K"
+          test -f "$BG"
+          test -f "$K"
+
           sed -Ei "s|^([[:space:]]*storePassword[[:space:]]+).*$|\1'$PASS'|" "$BG" || true
           sed -Ei "s|^([[:space:]]*keyPassword[[:space:]]+).*$|\1'$PASS'|" "$BG" || true
           sed -Ei "s|^([[:space:]]*storeFile[[:space:]]+file\()[^)]*(\).*)$|\1'../keystore_playmarket2.jks'\2|" "$BG" || true
@@ -113,7 +139,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          find "$PROJECT_DIR" -type f -name '*.gradle' -print0 | xargs -0 -r sed -i 's/jcenter()/mavenCentral()/g'
+          find "$PROJECT_DIR" -type f -name '*.gradle' -print0 |
+            xargs -0 -r sed -i 's/jcenter()/mavenCentral()/g'
 
       - name: Clean
         working-directory: ${{ env.PROJECT_DIR }}
@@ -126,6 +153,42 @@ jobs:
           set -o pipefail
           ./gradlew --no-daemon --stacktrace --warning-mode all :app:assembleRelease 2>&1 | tee /tmp/gradle-build.log
 
+      - name: Package APK
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find "$PROJECT_DIR/app/build/outputs/apk/release" -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          [ -n "$APK" ] || { echo 'ERROR: release APK not found'; exit 1; }
+
+          rm -rf release_package
+          mkdir -p release_package/parts
+          cp "$APK" release_package/DexinMobile.apk
+          (cd release_package && zip -9 -q DexinMobile-APK.zip DexinMobile.apk)
+
+          # Split the ZIP itself into parts no larger than 24 MiB.
+          # This keeps every upload comfortably below GitHub's 25 MB target.
+          split -b 24M -d -a 2 release_package/DexinMobile-APK.zip release_package/parts/DexinMobile-APK.part
+
+          i=1
+          for f in release_package/parts/DexinMobile-APK.part*; do
+            mv "$f" "$(printf 'release_package/parts/DexinMobile-APK-Part%02d.bin' "$i")"
+            i=$((i+1))
+          done
+
+          echo 'Created APK package parts:'
+          ls -lh release_package/parts/
+
+          while IFS= read -r f; do
+            bytes="$(stat -c '%s' "$f")"
+            [ "$bytes" -le 25000000 ] || { echo "ERROR: part exceeds 25,000,000 bytes: $f ($bytes)"; exit 1; }
+          done < <(find release_package/parts -type f -name '*.bin' -print | sort)
+
+          cat release_package/parts/DexinMobile-APK-Part*.bin > release_package/DexinMobile-APK-reassembled.zip
+          cmp release_package/DexinMobile-APK.zip release_package/DexinMobile-APK-reassembled.zip
+          unzip -t release_package/DexinMobile-APK-reassembled.zip
+          echo 'APK package reassembly verified successfully.'
+
       - name: Upload build log
         if: failure()
         uses: actions/upload-artifact@v4
@@ -134,11 +197,20 @@ jobs:
           path: /tmp/gradle-build.log
           retention-days: 7
 
-      - name: Upload APK
+      - name: Upload APK package parts
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: DexinMobile-Release-APK
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
+          name: DexinMobile-APK-Parts
+          path: release_package/parts/*.bin
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload complete APK package
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DexinMobile-APK-Complete
+          path: release_package/DexinMobile-APK.zip
           if-no-files-found: error
           retention-days: 7
