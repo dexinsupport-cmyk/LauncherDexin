@@ -1,4 +1,4 @@
-name: Build Dexin Mobile APK
+name: Build Dexin Mobile APK - Diagnostics
 
 on:
   workflow_dispatch:
@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
@@ -44,115 +45,8 @@ jobs:
           sed -i 's/\r$//' "$D/gradlew"
           chmod +x "$D/gradlew"
 
-      - name: Patch Android storage and diagnostics
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import os,re
-          root=Path(os.environ['PROJECT_DIR'])
-          mf=root/'app/src/main/AndroidManifest.xml'
-          s=mf.read_text(encoding='utf-8')
-          if 'android.permission.MANAGE_EXTERNAL_STORAGE' not in s:
-              m=re.search(r'<manifest\b[^>]*>',s,re.S)
-              if not m: raise SystemExit('manifest tag missing')
-              s=s[:m.end()]+'\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />'+s[m.end():]
-              mf.write_text(s,encoding='utf-8')
-
-          ma=root/'app/src/main/java/com/samp/mobile/launcher/MainActivity.java'
-          s=ma.read_text(encoding='utf-8')
-          for imp in ['import android.os.Environment;','import android.provider.Settings;','import android.net.Uri;','import java.io.File;']:
-              if imp not in s:
-                  anchor='import android.os.Bundle;'
-                  if imp=='import java.io.File;': anchor='import androidx.fragment.app.FragmentTransaction;'
-                  s=s.replace(anchor,anchor+'\n'+imp,1)
-          if 'private void startGameSafely()' not in s:
-              pat=re.compile(r'playButton\.setOnClickListener\s*\(v\s*->\s*\{.*?startActivity\(new Intent\(MainActivity\.this,\s*SAMP\.class\)\);.*?finish\(\);\s*\}\);',re.S)
-              if not pat.search(s): raise SystemExit('Start button handler not found')
-              s=pat.sub('playButton.setOnClickListener(v -> startGameSafely());',s,count=1)
-              method='''\n    private void startGameSafely() {\n        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {\n            try { Intent i=new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION); i.setData(Uri.parse("package:"+getPackageName())); startActivity(i); }\n            catch(Exception e){ startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)); }\n            return;\n        }\n        File root=new File(Environment.getExternalStorageDirectory(),"DexinMobile");\n        File samp=new File(root,"SAMP"); File data=new File(root,"data");\n        File[] a=root.isDirectory()?root.listFiles():null; File[] b=samp.isDirectory()?samp.listFiles():null; File[] c=data.isDirectory()?data.listFiles():null;\n        if(a==null||a.length==0||b==null||b.length==0||c==null||c.length==0){\n            new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Game files cannot be read").setMessage("DexinMobile/SAMP/data cannot be read. Grant All files access and try again.").setPositiveButton("OK",null).show(); return;\n        }\n        startActivity(new Intent(MainActivity.this,SAMP.class)); finish();\n    }\n'''
-              pos=s.find('\n    private void fetchOnline()')
-              if pos<0: raise SystemExit('fetchOnline insertion point not found')
-              s=s[:pos]+method+s[pos:]
-          ma.write_text(s,encoding='utf-8')
-
-          va=root/'app/src/main/java/com/samp/mobile/launcher/VerifyActivity.java'
-          va.write_text('''package com.samp.mobile.launcher;\n\nimport android.content.Intent;\nimport android.graphics.Color;\nimport android.net.Uri;\nimport android.os.Build;\nimport android.os.Bundle;\nimport android.os.Environment;\nimport android.provider.Settings;\nimport android.widget.Button;\nimport android.widget.TextView;\nimport androidx.appcompat.app.AppCompatActivity;\nimport com.samp.mobile.R;\nimport java.io.File;\n\npublic class VerifyActivity extends AppCompatActivity {\n private TextView statusIcon,statusTitle,statusDetails,pathText; private Button verifyButton;\n @Override protected void onCreate(Bundle b){super.onCreate(b);setContentView(R.layout.activity_verify);statusIcon=findViewById(R.id.verify_icon);statusTitle=findViewById(R.id.verify_title);statusDetails=findViewById(R.id.verify_details);pathText=findViewById(R.id.verify_path);verifyButton=findViewById(R.id.verify_button);pathText.setText("Game files: /storage/emulated/0/DexinMobile/");verifyButton.setOnClickListener(v->verify());verify();}\n private boolean access(){return Build.VERSION.SDK_INT<Build.VERSION_CODES.R||Environment.isExternalStorageManager();}\n private File root(){return new File(Environment.getExternalStorageDirectory(),"DexinMobile");}\n private void allow(){try{Intent i=new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);i.setData(Uri.parse("package:"+getPackageName()));startActivity(i);}catch(Exception e){startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));}}\n private int count(File f){File[] a=f.listFiles();if(a==null)return 0;int n=0;for(File x:a)n+=x.isDirectory()?count(x):1;return n;}\n private void verify(){if(!access()){statusIcon.setText("!");statusIcon.setTextColor(Color.RED);statusTitle.setText("ACCESS REQUIRED");statusDetails.setText("Allow All files access.");verifyButton.setText("ALLOW ACCESS");verifyButton.setOnClickListener(v->allow());return;}statusIcon.setText("…");statusTitle.setText("READING FILES");statusDetails.setText("Scanning DexinMobile...");verifyButton.setEnabled(false);new Thread(()->{File r=root();String[] req={"anim","audio","data","fonts","models","SAMP","texdb","Text","Textures"};StringBuilder q=new StringBuilder();int bad=0;int total=r.isDirectory()?count(r):0;for(String n:req){File d=new File(r,n);int c=d.isDirectory()?count(d):0;q.append(n).append(": ").append(c).append(" files\\n");if(c==0)bad++;}if(!r.isDirectory()||total==0)runOnUiThread(()->fail("DexinMobile cannot be read or contains 0 files."));else if(bad>0)runOnUiThread(()->fail("Required folders appear empty.\\n\\n"+q+"\\nTotal: "+total));else runOnUiThread(()->ok("All required folders are readable.\\n\\n"+q+"\\nTotal: "+total));}).start();}\n private void ok(String s){statusIcon.setText("✓");statusIcon.setTextColor(Color.rgb(0,230,100));statusTitle.setText("VERIFY");statusTitle.setTextColor(Color.rgb(0,230,100));statusDetails.setText(s);verifyButton.setEnabled(true);verifyButton.setText("VERIFY AGAIN");verifyButton.setOnClickListener(v->verify());}\n private void fail(String s){statusIcon.setText("!");statusIcon.setTextColor(Color.RED);statusTitle.setText("NO VERIFY");statusTitle.setTextColor(Color.RED);statusDetails.setText(s);verifyButton.setEnabled(true);verifyButton.setText("VERIFY AGAIN");verifyButton.setOnClickListener(v->verify());}\n}\n''',encoding='utf-8')
-          PY
-
-      - name: Fix native headers
-        shell: bash
-        run: |
-          set -euo pipefail
-          C="$PROJECT_DIR/app/src/main/cpp"
-          test -d "$C" || { echo "ERROR: C++ source missing: $C"; exit 1; }
-
-          # playerTabList.h is referenced by samp_widgets/gui.h. Normalize the
-          # filename and directory on Linux.
-          TARGET="$C/samp/samp_widgets"
-          mkdir -p "$TARGET"
-          PT="$(find "$C" -type f \( -iname 'playerTabList.h' -o -iname 'playertablist.h' \) -print -quit || true)"
-          if [ -n "$PT" ]; then
-            cp -f "$PT" "$TARGET/playerTabList.h"
-          else
-            echo "ERROR: playerTabList.h was not found anywhere in assembled C++ source"
-            find "$C" -type f | grep -Ei 'player.*tab.*list.*\.h$' || true
-            exit 1
-          fi
-
-          # This source's rgba.cpp includes RGBA.h while the original project
-          # uses the lower-case rgba.h. The required header was omitted from the
-          # split source, so restore the exact compatible declaration here.
-          GAME="$C/samp/game"
-          mkdir -p "$GAME"
-          cat > "$GAME/rgba.h" <<'EOF'
-          #pragma once
-
-          class CRGBA
-          {
-          public:
-              unsigned char R;
-              unsigned char G;
-              unsigned char B;
-              unsigned char A;
-
-              CRGBA(unsigned char red, unsigned char green, unsigned blue);
-              CRGBA(unsigned char red, unsigned char green, unsigned blue, unsigned char alpha);
-              CRGBA(CRGBA const &rhs);
-              CRGBA(unsigned int intValue);
-              CRGBA();
-
-              void Set(unsigned char red, unsigned char green, unsigned blue);
-              void Set(unsigned char red, unsigned char green, unsigned blue, unsigned char alpha);
-              void Set(CRGBA const &rhs);
-              void Set(CRGBA const &rhs, unsigned char alpha);
-              void Set(unsigned int intValue);
-
-              CRGBA ToRGB() const;
-              unsigned int ToInt() const;
-              unsigned int ToIntARGB() const;
-
-              void Invert();
-              CRGBA Inverted() const;
-
-              bool operator==(CRGBA const &rhs) const;
-              CRGBA &operator=(CRGBA const &rhs);
-          };
-          EOF
-          cp -f "$GAME/rgba.h" "$GAME/RGBA.h"
-          echo "Restored compatible $GAME/rgba.h and $GAME/RGBA.h"
-
-          RD="$(find "$C/samp" -maxdepth 3 -type d -iname 'raknet' -print -quit || true)"
-          [ -n "$RD" ] || { echo 'ERROR: RakNet directory missing'; exit 1; }
-          find "$C" -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -print0 |
-            xargs -0 -r sed -i \
-              -e 's|vendor/RakNet/|vendor/raknet/|g' \
-              -e 's|"RakNet/|"raknet/|g' \
-              -e 's|\.\./vendor/RakNet/|../vendor/raknet/|g'
-
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
@@ -168,16 +62,68 @@ jobs:
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager 'platform-tools' 'platforms;android-34' 'build-tools;34.0.0' 'ndk;26.2.11394342' 'cmake;3.22.1'
 
-      - name: Build Release APK
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Native source diagnostics
         shell: bash
         run: |
+          set -euo pipefail
+          C="$PROJECT_DIR/app/src/main/cpp"
+          echo '=== RGBA headers ==='
+          find "$C" -type f -iname '*rgba*.h' -print | sort || true
+          echo '=== playerTabList headers ==='
+          find "$C" -type f -iname '*playertablist*.h' -print | sort || true
+          echo '=== relevant includes ==='
+          grep -RIn --include='*.cpp' --include='*.c' --include='*.h' --include='*.hpp' -E '#include[[:space:]]*[<"](.*RGBA\.h|.*rgba\.h|.*playerTabList\.h|.*playertablist\.h)' "$C" || true
+
+      - name: Build Release APK
+        id: gradle_build
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        continue-on-error: true
+        run: |
           set -o pipefail
-          ./gradlew --no-daemon clean
-          ./gradlew --no-daemon --stacktrace --warning-mode all :app:assembleRelease 2>&1 | tee /tmp/gradle-build.log
+          ./gradlew --no-daemon --stacktrace --warning-mode all clean 2>&1 | tee /tmp/gradle-build.log
+          s=${PIPESTATUS[0]}; [ "$s" -eq 0 ] || exit "$s"
+          ./gradlew --no-daemon --stacktrace --warning-mode all :app:assembleRelease 2>&1 | tee -a /tmp/gradle-build.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Put exact Gradle error in Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Dexin Mobile Build Diagnostics'
+            echo
+            echo '**Build Release APK:** ${{ steps.gradle_build.outcome }}'
+            echo
+            if [ -f /tmp/gradle-build.log ]; then
+              echo '### Error lines'
+              echo '```text'
+              grep -nEi 'error:|fatal error:|FAILURE:|Execution failed|What went wrong|Caused by:|Could not find|Could not resolve|undefined reference|duplicate class' /tmp/gradle-build.log | tail -n 150 || true
+              echo '```'
+              echo
+              echo '### Last 300 lines'
+              echo '```text'
+              tail -n 300 /tmp/gradle-build.log
+              echo '```'
+            else
+              echo 'Gradle log was not created.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload complete Gradle log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DexinMobile-gradle-diagnostics
+          path: /tmp/gradle-build.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail if Gradle failed
+        if: steps.gradle_build.outcome != 'success'
+        run: exit 1
 
       - name: Copy APK
-        if: success()
         shell: bash
         run: |
           set -euo pipefail
@@ -186,19 +132,9 @@ jobs:
           cp "$APK" DexinMobile.apk
 
       - name: Upload APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: DexinMobile-APK
           path: DexinMobile.apk
           if-no-files-found: error
-          retention-days: 14
-
-      - name: Upload build log
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: DexinMobile-build-log
-          path: /tmp/gradle-build.log
-          if-no-files-found: ignore
           retention-days: 14
