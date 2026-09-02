@@ -13,42 +13,50 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Detect and assemble all source parts
+      - name: Detect and assemble source parts
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t PARTS < <(find . -maxdepth 2 -type f -regextype posix-extended -regex '.*/sampstable_DexinMobile_fixedPart[0-9]+\.zip' | sort -V)
-          if [ "${#PARTS[@]}" -eq 0 ]; then
-            mapfile -t PARTS < <(find . -maxdepth 2 -type f -regextype posix-extended -regex '.*/sampstable_(github_ready|DexinMobile_updated)Part[0-9]+(-[^/]*)?\.zip' | sort -V)
-          fi
-          [ "${#PARTS[@]}" -gt 0 ] || { echo 'ERROR: no source parts found'; exit 1; }
-          echo "Found ${#PARTS[@]} source parts:"
-          printf '  %s\n' "${PARTS[@]}"
+          shopt -s nullglob
+          mapfile -t ALL < <(find . -maxdepth 2 -type f -name '*.zip' -print)
+          mapfile -t PARTS < <(
+            printf '%s\n' "${ALL[@]}" |
+            awk '
+              match($0,/Part[0-9]+(-[^\/]*)?\.zip$/) {
+                s=substr($0,RSTART,RLENGTH); n=s; sub(/^Part/,"",n); sub(/-.*/,"",n); sub(/\.zip$/,"",n); print n "\t" $0
+              }
+            ' | sort -n -k1,1 | cut -f2-
+          )
+          [ "${#PARTS[@]}" -gt 0 ] || { echo 'ERROR: no source Part*.zip files found'; exit 1; }
+
           expected=1
           for part in "${PARTS[@]}"; do
-            base="$(basename "$part")"
-            num="$(printf '%s' "$base" | sed -E 's/.*Part([0-9]+).*/\1/')"
-            [ "$num" = "$expected" ] || { echo "ERROR: expected Part${expected}, found Part${num}"; exit 1; }
-            expected=$((expected + 1))
+            num="$(basename "$part" | sed -E 's/.*Part([0-9]+)(-[^/]*)?\.zip$/\1/')"
+            if [ "$num" != "$expected" ]; then
+              echo "ERROR: expected Part${expected}, found Part${num}: $(basename "$part")"
+              exit 1
+            fi
+            expected=$((expected+1))
           done
+
+          echo "Found ${#PARTS[@]} source parts:"
+          printf '  %s\n' "${PARTS[@]}"
           rm -f source.zip
           cat "${PARTS[@]}" > source.zip
-          unzip -t source.zip >/dev/null
+          unzip -t source.zip
           rm -rf _source
           mkdir _source
           unzip -q source.zip -d _source
-          echo "SOURCE_PARTS=${#PARTS[@]}" >> "$GITHUB_ENV"
 
       - name: Locate Gradle project
         shell: bash
         run: |
           set -euo pipefail
-          G="$(find _source -type f -name gradlew -print | head -n1)"
-          [ -n "$G" ] || { echo 'ERROR: gradlew not found'; exit 1; }
+          G="$(find _source -type f -name gradlew -print -quit)"
+          [ -n "$G" ] || { echo 'ERROR: gradlew not found after source extraction'; exit 1; }
           D="$(dirname "$G")"
           echo "PROJECT_DIR=$D" >> "$GITHUB_ENV"
           sed -i 's/\r$//' "$D/gradlew"
-          find "$D" -type f \( -name '*.gradle' -o -name '*.gradle.kts' -o -name '*.sh' -o -name '*.properties' -o -name '*.cmake' -o -name 'CMakeLists.txt' \) -exec sed -i 's/\r$//' {} \;
           chmod +x "$D/gradlew"
 
       - name: Set up JDK 17
@@ -76,19 +84,18 @@ jobs:
           P='DexinCI_2026_Release_Key!'
           rm -f "$K"
           keytool -genkeypair -alias my-key-alias -keyalg RSA -keysize 2048 -validity 10000 -keystore "$K" -storepass "$P" -keypass "$P" -dname 'CN=Dexin Mobile, OU=Release, O=Dexin Mobile, L=Dexin, ST=NA, C=US' -noprompt
-          keytool -list -keystore "$K" -storepass "$P" -alias my-key-alias >/dev/null
 
       - name: Fix native Linux case sensitivity
         shell: bash
         run: |
           set -euo pipefail
           C="$PROJECT_DIR/app/src/main/cpp"
-          P="$(find "$C" -type f -iname 'playertablist.h' -print | head -n1 || true)"; [ -z "$P" ] || cp -f "$P" "$(dirname "$P")/playerTabList.h"
-          R="$(find "$C" -type f -iname 'RGBA.h' -print | head -n1 || true)"; [ -z "$R" ] || cp -f "$R" "$(dirname "$R")/RGBA.h"
-          V="$C/samp/vendor"; RD="$(find "$V" -maxdepth 1 -type d -iname 'raknet' -print | head -n1 || true)"
+          P="$(find "$C" -type f -iname 'playertablist.h' -print -quit || true)"; [ -z "$P" ] || cp -f "$P" "$(dirname "$P")/playerTabList.h"
+          R="$(find "$C" -type f -iname 'RGBA.h' -print -quit || true)"; [ -z "$R" ] || cp -f "$R" "$(dirname "$R")/RGBA.h"
+          V="$C/samp/vendor"; RD="$(find "$V" -maxdepth 1 -type d -iname 'raknet' -print -quit || true)"
           [ -n "$RD" ] || { echo 'ERROR: RakNet directory missing'; exit 1; }
           find "$C" -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -print0 | xargs -0 -r sed -i -e 's|vendor/RakNet/|vendor/raknet/|g' -e 's|"RakNet/|"raknet/|g' -e 's|\.\./vendor/RakNet/|../vendor/raknet/|g'
-          for H in BitStream.h RakClientInterface.h RakClient.h; do F="$(find "$RD" -maxdepth 1 -type f -iname "$H" -print | head -n1 || true)"; [ -n "$F" ] || { echo "ERROR: $H missing"; exit 1; }; [ "$(basename "$F")" = "$H" ] || cp -f "$F" "$RD/$H"; done
+          for H in BitStream.h RakClientInterface.h RakClient.h; do F="$(find "$RD" -maxdepth 1 -type f -iname "$H" -print -quit || true)"; [ -n "$F" ] || { echo "ERROR: $H missing"; exit 1; }; [ "$(basename "$F")" = "$H" ] || cp -f "$F" "$RD/$H"; done
 
       - name: Fix release signing configuration
         shell: bash
@@ -98,11 +105,9 @@ jobs:
           PASS='DexinCI_2026_Release_Key!'
           K="$PROJECT_DIR/keystore_playmarket2.jks"
           test -f "$BG"; test -f "$K"
-          sed -Ei "s|^([[:space:]]*storePassword[[:space:]]+).*$|\1'$PASS'|" "$BG"
-          sed -Ei "s|^([[:space:]]*keyPassword[[:space:]]+).*$|\1'$PASS'|" "$BG"
+          sed -Ei "s|^([[:space:]]*storePassword[[:space:]]+).*$|\1'$PASS'|" "$BG" || true
+          sed -Ei "s|^([[:space:]]*keyPassword[[:space:]]+).*$|\1'$PASS'|" "$BG" || true
           sed -Ei "s|^([[:space:]]*storeFile[[:space:]]+file\()[^)]*(\).*)$|\1'../keystore_playmarket2.jks'\2|" "$BG" || true
-          keytool -list -keystore "$K" -storepass "$PASS" -alias my-key-alias >/dev/null
-          grep -n -E 'storeFile|storePassword|keyPassword|keyAlias' "$BG" || true
 
       - name: Patch deprecated repository
         shell: bash
@@ -112,7 +117,6 @@ jobs:
 
       - name: Clean
         working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
         run: ./gradlew --no-daemon clean
 
       - name: Build Release APK
