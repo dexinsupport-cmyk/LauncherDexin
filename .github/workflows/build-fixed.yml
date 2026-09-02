@@ -81,35 +81,68 @@ jobs:
           va.write_text('''package com.samp.mobile.launcher;\n\nimport android.content.Intent;\nimport android.graphics.Color;\nimport android.net.Uri;\nimport android.os.Build;\nimport android.os.Bundle;\nimport android.os.Environment;\nimport android.provider.Settings;\nimport android.widget.Button;\nimport android.widget.TextView;\nimport androidx.appcompat.app.AppCompatActivity;\nimport com.samp.mobile.R;\nimport java.io.File;\n\npublic class VerifyActivity extends AppCompatActivity {\n private TextView statusIcon,statusTitle,statusDetails,pathText; private Button verifyButton;\n @Override protected void onCreate(Bundle b){super.onCreate(b);setContentView(R.layout.activity_verify);statusIcon=findViewById(R.id.verify_icon);statusTitle=findViewById(R.id.verify_title);statusDetails=findViewById(R.id.verify_details);pathText=findViewById(R.id.verify_path);verifyButton=findViewById(R.id.verify_button);pathText.setText("Game files: /storage/emulated/0/DexinMobile/");verifyButton.setOnClickListener(v->verify());verify();}\n private boolean access(){return Build.VERSION.SDK_INT<Build.VERSION_CODES.R||Environment.isExternalStorageManager();}\n private File root(){return new File(Environment.getExternalStorageDirectory(),"DexinMobile");}\n private void allow(){try{Intent i=new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);i.setData(Uri.parse("package:"+getPackageName()));startActivity(i);}catch(Exception e){startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));}}\n private int count(File f){File[] a=f.listFiles();if(a==null)return 0;int n=0;for(File x:a)n+=x.isDirectory()?count(x):1;return n;}\n private void verify(){if(!access()){statusIcon.setText("!");statusIcon.setTextColor(Color.RED);statusTitle.setText("ACCESS REQUIRED");statusDetails.setText("Allow All files access.");verifyButton.setText("ALLOW ACCESS");verifyButton.setOnClickListener(v->allow());return;}statusIcon.setText("…");statusTitle.setText("READING FILES");statusDetails.setText("Scanning DexinMobile...");verifyButton.setEnabled(false);new Thread(()->{File r=root();String[] req={"anim","audio","data","fonts","models","SAMP","texdb","Text","Textures"};StringBuilder q=new StringBuilder();int bad=0;int total=r.isDirectory()?count(r):0;for(String n:req){File d=new File(r,n);int c=d.isDirectory()?count(d):0;q.append(n).append(": ").append(c).append(" files\\n");if(c==0)bad++;}if(!r.isDirectory()||total==0)runOnUiThread(()->fail("DexinMobile cannot be read or contains 0 files."));else if(bad>0)runOnUiThread(()->fail("Required folders appear empty.\\n\\n"+q+"\\nTotal: "+total));else runOnUiThread(()->ok("All required folders are readable.\\n\\n"+q+"\\nTotal: "+total));}).start();}\n private void ok(String s){statusIcon.setText("✓");statusIcon.setTextColor(Color.rgb(0,230,100));statusTitle.setText("VERIFY");statusTitle.setTextColor(Color.rgb(0,230,100));statusDetails.setText(s);verifyButton.setEnabled(true);verifyButton.setText("VERIFY AGAIN");verifyButton.setOnClickListener(v->verify());}\n private void fail(String s){statusIcon.setText("!");statusIcon.setTextColor(Color.RED);statusTitle.setText("NO VERIFY");statusTitle.setTextColor(Color.RED);statusDetails.setText(s);verifyButton.setEnabled(true);verifyButton.setText("VERIFY AGAIN");verifyButton.setOnClickListener(v->verify());}\n}\n''',encoding='utf-8')
           PY
 
-      - name: Fix native header case and locations
+      - name: Fix native headers
         shell: bash
         run: |
           set -euo pipefail
           C="$PROJECT_DIR/app/src/main/cpp"
           test -d "$C" || { echo "ERROR: C++ source missing: $C"; exit 1; }
 
-          # The source includes samp_widgets/playerTabList.h. On Linux the case and
-          # directory must match exactly. Find the header in the assembled source,
-          # then place a correctly-cased copy at the include path expected by gui.h.
+          # playerTabList.h is referenced by samp_widgets/gui.h. Normalize the
+          # filename and directory on Linux.
           TARGET="$C/samp/samp_widgets"
           mkdir -p "$TARGET"
           PT="$(find "$C" -type f \( -iname 'playerTabList.h' -o -iname 'playertablist.h' \) -print -quit || true)"
           if [ -n "$PT" ]; then
             cp -f "$PT" "$TARGET/playerTabList.h"
-            echo "Prepared $TARGET/playerTabList.h from $PT"
           else
             echo "ERROR: playerTabList.h was not found anywhere in assembled C++ source"
             find "$C" -type f | grep -Ei 'player.*tab.*list.*\.h$' || true
             exit 1
           fi
 
-          RG="$C/samp/samp_widgets"
-          R="$(find "$C" -type f -iname 'RGBA.h' -print -quit || true)"
-          if [ -n "$R" ]; then
-            cp -f "$R" "$RG/RGBA.h"
-          fi
+          # This source's rgba.cpp includes RGBA.h while the original project
+          # uses the lower-case rgba.h. The required header was omitted from the
+          # split source, so restore the exact compatible declaration here.
+          GAME="$C/samp/game"
+          mkdir -p "$GAME"
+          cat > "$GAME/rgba.h" <<'EOF'
+          #pragma once
 
-          # Normalize common RakNet path case differences.
+          class CRGBA
+          {
+          public:
+              unsigned char R;
+              unsigned char G;
+              unsigned char B;
+              unsigned char A;
+
+              CRGBA(unsigned char red, unsigned char green, unsigned blue);
+              CRGBA(unsigned char red, unsigned char green, unsigned blue, unsigned char alpha);
+              CRGBA(CRGBA const &rhs);
+              CRGBA(unsigned int intValue);
+              CRGBA();
+
+              void Set(unsigned char red, unsigned char green, unsigned blue);
+              void Set(unsigned char red, unsigned char green, unsigned blue, unsigned char alpha);
+              void Set(CRGBA const &rhs);
+              void Set(CRGBA const &rhs, unsigned char alpha);
+              void Set(unsigned int intValue);
+
+              CRGBA ToRGB() const;
+              unsigned int ToInt() const;
+              unsigned int ToIntARGB() const;
+
+              void Invert();
+              CRGBA Inverted() const;
+
+              bool operator==(CRGBA const &rhs) const;
+              CRGBA &operator=(CRGBA const &rhs);
+          };
+          EOF
+          cp -f "$GAME/rgba.h" "$GAME/RGBA.h"
+          echo "Restored compatible $GAME/rgba.h and $GAME/RGBA.h"
+
           RD="$(find "$C/samp" -maxdepth 3 -type d -iname 'raknet' -print -quit || true)"
           [ -n "$RD" ] || { echo 'ERROR: RakNet directory missing'; exit 1; }
           find "$C" -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -print0 |
