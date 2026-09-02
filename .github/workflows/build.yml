@@ -59,6 +59,152 @@ jobs:
           sed -i 's/\r$//' "$D/gradlew"
           chmod +x "$D/gradlew"
 
+      - name: Replace VerifyActivity with offline DexinMobile verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="$PROJECT_DIR/app/src/main/java/com/samp/mobile/launcher/VerifyActivity.java"
+          test -f "$V" || { echo "ERROR: VerifyActivity.java not found: $V"; exit 1; }
+          cat > "$V" <<'JAVA'
+          package com.samp.mobile.launcher;
+
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.TextView;
+          import androidx.appcompat.app.AppCompatActivity;
+          import com.samp.mobile.R;
+          import java.io.File;
+
+          public class VerifyActivity extends AppCompatActivity {
+              private TextView statusIcon, statusTitle, statusDetails, pathText;
+              private Button verifyButton;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  setContentView(R.layout.activity_verify);
+                  statusIcon = findViewById(R.id.verify_icon);
+                  statusTitle = findViewById(R.id.verify_title);
+                  statusDetails = findViewById(R.id.verify_details);
+                  pathText = findViewById(R.id.verify_path);
+                  verifyButton = findViewById(R.id.verify_button);
+                  pathText.setText("Game files: /storage/emulated/0/DexinMobile/");
+                  verifyButton.setOnClickListener(v -> verifyFiles());
+                  verifyFiles();
+              }
+
+              private File gameDir() {
+                  return new File(Environment.getExternalStorageDirectory(), "DexinMobile");
+              }
+
+              private void checking() {
+                  statusIcon.setText("…");
+                  statusIcon.setTextColor(getResources().getColor(R.color.white));
+                  statusTitle.setText("VERIFYING");
+                  statusTitle.setTextColor(getResources().getColor(R.color.white));
+                  statusDetails.setText("Checking DexinMobile game files offline...");
+                  verifyButton.setEnabled(false);
+              }
+
+              private void verified(int files) {
+                  statusIcon.setText("✓");
+                  statusIcon.setTextColor(getResources().getColor(R.color.verify_green));
+                  statusTitle.setText("VERIFY");
+                  statusTitle.setTextColor(getResources().getColor(R.color.verify_green));
+                  statusDetails.setText("Game files are installed correctly.\nFiles checked: " + files);
+                  verifyButton.setEnabled(true);
+              }
+
+              private void notVerified(String reason) {
+                  statusIcon.setText("!");
+                  statusIcon.setTextColor(getResources().getColor(R.color.verify_red));
+                  statusTitle.setText("NO VERIFY");
+                  statusTitle.setTextColor(getResources().getColor(R.color.verify_red));
+                  statusDetails.setText(reason);
+                  verifyButton.setEnabled(true);
+              }
+
+              private void verifyFiles() {
+                  checking();
+                  new Thread(() -> {
+                      try {
+                          File root = gameDir();
+                          if (!root.isDirectory()) {
+                              runOnUiThread(() -> notVerified("DexinMobile folder was not found."));
+                              return;
+                          }
+
+                          String[] requiredDirs = {"anim", "audio", "data", "fonts", "models", "SAMP", "texdb", "Text", "Textures"};
+                          String[] missingDirs = new String[requiredDirs.length];
+                          int missing = 0;
+                          for (String name : requiredDirs) {
+                              File d = new File(root, name);
+                              if (!d.isDirectory() || d.list() == null || d.list().length == 0) {
+                                  missingDirs[missing++] = name;
+                              }
+                          }
+
+                          String[] requiredFiles = {"CINFO.BIN", "gtasatelem.set", "stream.ini"};
+                          StringBuilder missingFiles = new StringBuilder();
+                          for (String name : requiredFiles) {
+                              File f = new File(root, name);
+                              if (!f.isFile() || f.length() <= 0) {
+                                  if (missingFiles.length() > 0) missingFiles.append(", ");
+                                  missingFiles.append(name);
+                              }
+                          }
+
+                          int[] counts = scan(root);
+                          int bad = counts[1];
+                          int total = counts[0];
+
+                          if (missing > 0 || missingFiles.length() > 0 || bad > 0 || total < 10) {
+                              StringBuilder msg = new StringBuilder("Game files are incomplete or damaged.");
+                              if (missing > 0) {
+                                  msg.append("\nMissing/empty folders: ");
+                                  for (int i = 0; i < missing; i++) {
+                                      if (i > 0) msg.append(", ");
+                                      msg.append(missingDirs[i]);
+                                  }
+                              }
+                              if (missingFiles.length() > 0) msg.append("\nMissing/empty files: ").append(missingFiles);
+                              if (bad > 0) msg.append("\nZero-byte files: ").append(bad);
+                              if (total < 10) msg.append("\nToo few game files detected.");
+                              runOnUiThread(() -> notVerified(msg.toString()));
+                          } else {
+                              final int checked = total;
+                              runOnUiThread(() -> verified(checked));
+                          }
+                      } catch (Exception e) {
+                          runOnUiThread(() -> notVerified("Could not read the DexinMobile game folder."));
+                      }
+                  }).start();
+              }
+
+              private int[] scan(File dir) {
+                  int files = 0, bad = 0;
+                  File[] list = dir.listFiles();
+                  if (list == null) return new int[]{0, 0};
+                  for (File f : list) {
+                      if (f.isDirectory()) {
+                          int[] x = scan(f);
+                          files += x[0];
+                          bad += x[1];
+                      } else if (f.isFile()) {
+                          files++;
+                          if (f.length() == 0) bad++;
+                      }
+                  }
+                  return new int[]{files, bad};
+              }
+          }
+          JAVA
+          sed -i 's/^          //' "$V"
+          grep -q 'offline DexinMobile verifier' /dev/null 2>/dev/null || true
+          echo "Offline VerifyActivity installed: $V"
+
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
@@ -151,7 +297,6 @@ jobs:
           cp "$APK" DexinMobile.apk
           ls -lh DexinMobile.apk
           file DexinMobile.apk
-          unzip -t DexinMobile.apk >/dev/null || true
 
       - name: Upload actual APK
         if: success()
