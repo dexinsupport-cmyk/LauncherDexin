@@ -5,6 +5,9 @@ on:
   push:
     branches: [main, master]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build Dexin Mobile APK
@@ -38,8 +41,6 @@ jobs:
             fi
             expected=$((expected+1))
           done
-          echo "Found ${#PARTS[@]} source parts:"
-          printf '  %s\n' "${PARTS[@]}"
           rm -f source.zip
           cat "${PARTS[@]}" > source.zip
           unzip -t source.zip
@@ -67,9 +68,6 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: tools platform-tools
-          accept-android-sdk-licenses: true
 
       - name: Install Android SDK components
         shell: bash
@@ -99,8 +97,8 @@ jobs:
           [ -z "$P" ] || cp -f "$P" "$(dirname "$P")/playerTabList.h"
           R="$(find "$C" -type f -iname 'RGBA.h' -print -quit || true)"
           [ -z "$R" ] || cp -f "$R" "$(dirname "$R")/RGBA.h"
-          V="$C/samp/vendor"
-          RD="$(find "$V" -maxdepth 1 -type d -iname 'raknet' -print -quit || true)"
+          V="$C/samp"
+          RD="$(find "$V" -maxdepth 2 -type d -iname 'raknet' -print -quit || true)"
           [ -n "$RD" ] || { echo 'ERROR: RakNet directory missing'; exit 1; }
           find "$C" -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -print0 |
             xargs -0 -r sed -i \
@@ -120,8 +118,7 @@ jobs:
           BG="$PROJECT_DIR/app/build.gradle"
           PASS='DexinCI_2026_Release_Key!'
           K="$PROJECT_DIR/keystore_playmarket2.jks"
-          test -f "$BG"
-          test -f "$K"
+          test -f "$BG" && test -f "$K"
           sed -Ei "s|^([[:space:]]*storePassword[[:space:]]+).*$|\1'$PASS'|" "$BG" || true
           sed -Ei "s|^([[:space:]]*keyPassword[[:space:]]+).*$|\1'$PASS'|" "$BG" || true
           sed -Ei "s|^([[:space:]]*storeFile[[:space:]]+file\()[^)]*(\).*)$|\1'../keystore_playmarket2.jks'\2|" "$BG" || true
@@ -144,40 +141,37 @@ jobs:
           set -o pipefail
           ./gradlew --no-daemon --stacktrace --warning-mode all :app:assembleRelease 2>&1 | tee /tmp/gradle-build.log
 
-      - name: Package APK
+      - name: Prepare APK output
         if: success()
         shell: bash
         run: |
           set -euo pipefail
           APK="$(find "$PROJECT_DIR/app/build/outputs/apk/release" -maxdepth 1 -type f -name '*.apk' -print -quit)"
           [ -n "$APK" ] || { echo 'ERROR: release APK not found'; exit 1; }
-          rm -rf release_package
-          mkdir -p release_package/parts
-          cp "$APK" release_package/DexinMobile.apk
-          (cd release_package && zip -9 -q DexinMobile-APK.zip DexinMobile.apk)
+          cp "$APK" DexinMobile.apk
+          ls -lh DexinMobile.apk
+          file DexinMobile.apk
+          unzip -t DexinMobile.apk >/dev/null || true
 
-          # 24,000,000 bytes is intentionally below the 25 MB upload limit.
-          # Do NOT use split -b 24M because 24 MiB = 25,165,824 bytes.
-          split -b 24000000 -d -a 2 release_package/DexinMobile-APK.zip release_package/parts/DexinMobile-APK.part
+      - name: Upload actual APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DexinMobile-APK
+          path: DexinMobile.apk
+          if-no-files-found: error
+          retention-days: 14
 
-          i=1
-          for f in release_package/parts/DexinMobile-APK.part*; do
-            mv "$f" "$(printf 'release_package/parts/DexinMobile-APK-Part%02d.bin' "$i")"
-            i=$((i+1))
-          done
-
-          echo 'Created APK package parts:'
-          ls -lh release_package/parts/
-
-          while IFS= read -r f; do
-            bytes="$(stat -c '%s' "$f")"
-            [ "$bytes" -le 25000000 ] || { echo "ERROR: part exceeds 25,000,000 bytes: $f ($bytes)"; exit 1; }
-          done < <(find release_package/parts -type f -name '*.bin' -print | sort)
-
-          cat release_package/parts/DexinMobile-APK-Part*.bin > release_package/DexinMobile-APK-reassembled.zip
-          cmp release_package/DexinMobile-APK.zip release_package/DexinMobile-APK-reassembled.zip
-          unzip -t release_package/DexinMobile-APK-reassembled.zip
-          echo 'APK package reassembly verified successfully.'
+      - name: Publish APK as GitHub Release asset
+        if: success() && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dexinmobile-${{ github.run_number }}
+          name: Dexin Mobile APK ${{ github.run_number }}
+          generate_release_notes: false
+          files: DexinMobile.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload build log
         if: failure()
@@ -185,22 +179,4 @@ jobs:
         with:
           name: DexinMobile-build-log
           path: /tmp/gradle-build.log
-          retention-days: 7
-
-      - name: Upload APK package parts
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: DexinMobile-APK-Parts
-          path: release_package/parts/*.bin
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload complete APK package
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: DexinMobile-APK-Complete
-          path: release_package/DexinMobile-APK.zip
-          if-no-files-found: error
           retention-days: 7
