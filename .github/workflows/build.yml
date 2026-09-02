@@ -41,6 +41,7 @@ jobs:
             fi
             expected=$((expected+1))
           done
+          echo "Found ${#PARTS[@]} source parts"
           rm -f source.zip
           cat "${PARTS[@]}" > source.zip
           unzip -t source.zip
@@ -53,36 +54,71 @@ jobs:
         run: |
           set -euo pipefail
           G="$(find _source -type f -name gradlew -print -quit)"
-          [ -n "$G" ] || { echo 'ERROR: gradlew not found after source extraction'; exit 1; }
+          [ -n "$G" ] || { echo 'ERROR: gradlew not found'; exit 1; }
           D="$(dirname "$G")"
           echo "PROJECT_DIR=$D" >> "$GITHUB_ENV"
           sed -i 's/\r$//' "$D/gradlew"
           chmod +x "$D/gradlew"
 
-      - name: Replace VerifyActivity with offline DexinMobile verifier
+      - name: Patch Dexin storage, startup checks, offline Verify and native crash guard
         shell: bash
         run: |
           set -euo pipefail
-          V="$PROJECT_DIR/app/src/main/java/com/samp/mobile/launcher/VerifyActivity.java"
-          test -f "$V" || { echo "ERROR: VerifyActivity.java not found: $V"; exit 1; }
-          cat > "$V" <<'JAVA'
-          package com.samp.mobile.launcher;
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
 
+          root = Path(os.environ["PROJECT_DIR"])
+
+          manifest = root / "jsons" / "files.json"
+          assets = root / "app" / "src" / "main" / "assets"
+          assets.mkdir(parents=True, exist_ok=True)
+          (assets / "files.json").write_bytes(manifest.read_bytes())
+
+          p = root / "app/src/main/java/com/samp/mobile/launcher/MainActivity.java"
+          s = p.read_text()
+          s = s.replace("import android.os.Bundle;\n", "import android.os.Bundle;\nimport android.os.Environment;\nimport android.provider.Settings;\n")
+          if "import java.io.File;" not in s:
+              s = s.replace("import androidx.fragment.app.FragmentTransaction;\n", "import androidx.fragment.app.FragmentTransaction;\n\nimport java.io.File;\n")
+          old = '''        playButton.setOnClickListener(v -> {\n            startActivity(new Intent(MainActivity.this, SAMP.class));\n            finish();\n        });'''
+          new = '''        playButton.setOnClickListener(v -> startGameSafely());'''
+          if old in s:
+              s = s.replace(old, new)
+          elif "startGameSafely()" not in s:
+              raise SystemExit("MainActivity Start handler pattern not found")
+          marker = "\n    private void fetchOnline()"
+          method = r'''\n    private void startGameSafely() {\n        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R\n                && !Environment.isExternalStorageManager()) {\n            try {\n                Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);\n                intent.setData(Uri.parse("package:" + getPackageName()));\n                startActivity(intent);\n            } catch (Exception e) {\n                startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));\n            }\n            return;\n        }\n\n        File root = new File(Environment.getExternalStorageDirectory(), "DexinMobile");\n        File[] files = root.isDirectory() ? root.listFiles() : null;\n        if (files == null || files.length == 0) {\n            new androidx.appcompat.app.AlertDialog.Builder(this)\n                    .setTitle("Game files cannot be read")\n                    .setMessage("DexinMobile cannot be read. Grant All files access and make sure the game files are installed.")\n                    .setPositiveButton("OK", null)\n                    .show();\n            return;\n        }\n\n        startActivity(new Intent(MainActivity.this, SAMP.class));\n        finish();\n    }\n'''
+          if "private void startGameSafely()" not in s:
+              if marker not in s: raise SystemExit("MainActivity insertion point not found")
+              s = s.replace(marker, method + marker)
+          p.write_text(s)
+
+          v = root / "app/src/main/java/com/samp/mobile/launcher/VerifyActivity.java"
+          v.write_text(r'''package com.samp.mobile.launcher;
+
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.os.Build;
           import android.os.Bundle;
           import android.os.Environment;
-          import android.view.View;
+          import android.provider.Settings;
           import android.widget.Button;
           import android.widget.TextView;
           import androidx.appcompat.app.AppCompatActivity;
           import com.samp.mobile.R;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import java.io.BufferedReader;
           import java.io.File;
+          import java.io.InputStreamReader;
+          import java.util.ArrayList;
+          import java.util.List;
 
           public class VerifyActivity extends AppCompatActivity {
               private TextView statusIcon, statusTitle, statusDetails, pathText;
               private Button verifyButton;
 
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
+              @Override protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   setContentView(R.layout.activity_verify);
                   statusIcon = findViewById(R.id.verify_icon);
@@ -95,115 +131,107 @@ jobs:
                   verifyFiles();
               }
 
-              private File gameDir() {
-                  return new File(Environment.getExternalStorageDirectory(), "DexinMobile");
+              private File gameDir() { return new File(Environment.getExternalStorageDirectory(), "DexinMobile"); }
+              private boolean hasAccess() { return Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager(); }
+              private void requestAccess() {
+                  try {
+                      Intent i = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                      i.setData(Uri.parse("package:" + getPackageName()));
+                      startActivity(i);
+                  } catch (Exception e) { startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)); }
               }
-
               private void checking() {
-                  statusIcon.setText("…");
-                  statusIcon.setTextColor(getResources().getColor(R.color.white));
-                  statusTitle.setText("VERIFYING");
-                  statusTitle.setTextColor(getResources().getColor(R.color.white));
-                  statusDetails.setText("Checking DexinMobile game files offline...");
-                  verifyButton.setEnabled(false);
+                  statusIcon.setText("…"); statusIcon.setTextColor(getResources().getColor(R.color.white));
+                  statusTitle.setText("VERIFYING"); statusTitle.setTextColor(getResources().getColor(R.color.white));
+                  statusDetails.setText("Reading DexinMobile files..."); verifyButton.setEnabled(false);
               }
-
-              private void verified(int files) {
-                  statusIcon.setText("✓");
-                  statusIcon.setTextColor(getResources().getColor(R.color.verify_green));
-                  statusTitle.setText("VERIFY");
-                  statusTitle.setTextColor(getResources().getColor(R.color.verify_green));
-                  statusDetails.setText("Game files are installed correctly.\nFiles checked: " + files);
+              private void verified(int n) {
+                  statusIcon.setText("✓"); statusIcon.setTextColor(getResources().getColor(R.color.verify_green));
+                  statusTitle.setText("VERIFY"); statusTitle.setTextColor(getResources().getColor(R.color.verify_green));
+                  statusDetails.setText("All required game files are present and sizes match.\nChecked: " + n);
                   verifyButton.setEnabled(true);
               }
-
-              private void notVerified(String reason) {
-                  statusIcon.setText("!");
-                  statusIcon.setTextColor(getResources().getColor(R.color.verify_red));
-                  statusTitle.setText("NO VERIFY");
-                  statusTitle.setTextColor(getResources().getColor(R.color.verify_red));
-                  statusDetails.setText(reason);
-                  verifyButton.setEnabled(true);
+              private void notVerified(String s) {
+                  statusIcon.setText("!"); statusIcon.setTextColor(getResources().getColor(R.color.verify_red));
+                  statusTitle.setText("NO VERIFY"); statusTitle.setTextColor(getResources().getColor(R.color.verify_red));
+                  statusDetails.setText(s); verifyButton.setEnabled(true);
               }
-
               private void verifyFiles() {
                   checking();
+                  if (!hasAccess()) {
+                      statusIcon.setText("!"); statusTitle.setText("ACCESS REQUIRED");
+                      statusDetails.setText("Allow All files access so DexinMobile can be read.");
+                      verifyButton.setText("ALLOW ACCESS"); verifyButton.setEnabled(true);
+                      verifyButton.setOnClickListener(v -> requestAccess()); return;
+                  }
+                  verifyButton.setText("VERIFY FILES"); verifyButton.setOnClickListener(v -> verifyFiles());
                   new Thread(() -> {
                       try {
                           File root = gameDir();
-                          if (!root.isDirectory()) {
-                              runOnUiThread(() -> notVerified("DexinMobile folder was not found."));
-                              return;
+                          if (!root.isDirectory()) { runOnUiThread(() -> notVerified("DexinMobile folder was not found.")); return; }
+                          if (root.listFiles() == null) { runOnUiThread(() -> notVerified("Android blocked access to DexinMobile.")); return; }
+
+                          BufferedReader r = new BufferedReader(new InputStreamReader(getAssets().open("files.json")));
+                          StringBuilder b = new StringBuilder(); String line;
+                          while ((line = r.readLine()) != null) b.append(line); r.close();
+                          JSONArray files = new JSONObject(b.toString()).getJSONArray("files");
+                          List<String> missing = new ArrayList<>(); List<String> wrong = new ArrayList<>(); int checked = 0;
+                          for (int i = 0; i < files.length(); i++) {
+                              JSONObject item = files.getJSONObject(i);
+                              String name = item.getString("name"), path = item.getString("path");
+                              long expected = item.getLong("size");
+                              if (isIgnored(name) || isGpuVariant(path)) continue;
+                              File f = new File(root, path); checked++;
+                              if (!f.isFile()) missing.add(path); else if (f.length() != expected) wrong.add(path);
                           }
-
-                          String[] requiredDirs = {"anim", "audio", "data", "fonts", "models", "SAMP", "texdb", "Text", "Textures"};
-                          String[] missingDirs = new String[requiredDirs.length];
-                          int missing = 0;
-                          for (String name : requiredDirs) {
-                              File d = new File(root, name);
-                              if (!d.isDirectory() || d.list() == null || d.list().length == 0) {
-                                  missingDirs[missing++] = name;
-                              }
-                          }
-
-                          String[] requiredFiles = {"CINFO.BIN", "gtasatelem.set", "stream.ini"};
-                          StringBuilder missingFiles = new StringBuilder();
-                          for (String name : requiredFiles) {
-                              File f = new File(root, name);
-                              if (!f.isFile() || f.length() <= 0) {
-                                  if (missingFiles.length() > 0) missingFiles.append(", ");
-                                  missingFiles.append(name);
-                              }
-                          }
-
-                          int[] counts = scan(root);
-                          int bad = counts[1];
-                          int total = counts[0];
-
-                          if (missing > 0 || missingFiles.length() > 0 || bad > 0 || total < 10) {
-                              StringBuilder msg = new StringBuilder("Game files are incomplete or damaged.");
-                              if (missing > 0) {
-                                  msg.append("\nMissing/empty folders: ");
-                                  for (int i = 0; i < missing; i++) {
-                                      if (i > 0) msg.append(", ");
-                                      msg.append(missingDirs[i]);
-                                  }
-                              }
-                              if (missingFiles.length() > 0) msg.append("\nMissing/empty files: ").append(missingFiles);
-                              if (bad > 0) msg.append("\nZero-byte files: ").append(bad);
-                              if (total < 10) msg.append("\nToo few game files detected.");
+                          if (!missing.isEmpty() || !wrong.isEmpty()) {
+                              StringBuilder msg = new StringBuilder("Game files are incomplete or damaged.\n");
+                              if (!missing.isEmpty()) msg.append("Missing: ").append(missing.size()).append("\n");
+                              if (!wrong.isEmpty()) msg.append("Wrong size: ").append(wrong.size()).append("\n");
+                              msg.append("Check the files and press VERIFY again.");
                               runOnUiThread(() -> notVerified(msg.toString()));
-                          } else {
-                              final int checked = total;
-                              runOnUiThread(() -> verified(checked));
-                          }
-                      } catch (Exception e) {
-                          runOnUiThread(() -> notVerified("Could not read the DexinMobile game folder."));
-                      }
+                          } else runOnUiThread(() -> verified(checked));
+                      } catch (Exception e) { runOnUiThread(() -> notVerified("Could not read the DexinMobile game files.")); }
                   }).start();
               }
-
-              private int[] scan(File dir) {
-                  int files = 0, bad = 0;
-                  File[] list = dir.listFiles();
-                  if (list == null) return new int[]{0, 0};
-                  for (File f : list) {
-                      if (f.isDirectory()) {
-                          int[] x = scan(f);
-                          files += x[0];
-                          bad += x[1];
-                      } else if (f.isFile()) {
-                          files++;
-                          if (f.length() == 0) bad++;
-                      }
-                  }
-                  return new int[]{files, bad};
+              private boolean isIgnored(String n) {
+                  return n.equals("samp_log.txt") || n.equals("svlog.txt") || n.equals("gtasatelem.set") ||
+                         n.equals("GTASAMP10.b") || n.equals(".htaccess") || n.equals("gta_sa.set") || n.equals("settings.ini");
               }
+              private boolean isGpuVariant(String p) { return p.contains(".dxt.") || p.contains(".etc.") || p.contains(".pvr."); }
           }
-          JAVA
-          sed -i 's/^          //' "$V"
-          grep -q 'offline DexinMobile verifier' /dev/null 2>/dev/null || true
-          echo "Offline VerifyActivity installed: $V"
+          ''')
+
+          p = root / "app/src/main/cpp/samp/main.cpp"
+          s = p.read_text(encoding="utf-8-sig")
+          if "g_dexinStorage" not in s.split("void ReadSettingFile",1)[0]:
+              s = s.replace("char* g_pszStorage = nullptr;", "char* g_pszStorage = nullptr;\nchar g_dexinStorage[512] = {0};")
+          old = '''jint JNI_OnLoad(JavaVM* vm, void* reserved)\n{\n\tjavaVM = vm;\n\tLOGI("SA-MP library loaded! Build time: " __DATE__ " " __TIME__);'''
+          new = '''jint JNI_OnLoad(JavaVM* vm, void* reserved)\n{\n\tjavaVM = vm;\n    const char* ext = getenv("EXTERNAL_STORAGE");\n    if (!ext || !ext[0]) ext = "/storage/emulated/0";\n    snprintf(g_dexinStorage, sizeof(g_dexinStorage), "%s/DexinMobile/", ext);\n    g_pszStorage = g_dexinStorage;\n\tLOGI("SA-MP library loaded! Build time: " __DATE__ " " __TIME__);\n    LOGI("Dexin native storage: %s", g_pszStorage);'''
+          if old in s: s=s.replace(old,new)
+          p.write_text(s, encoding="utf-8")
+
+          p = root / "app/src/main/cpp/samp/main.h"
+          s = p.read_text(encoding="utf-8-sig")
+          if "extern char g_dexinStorage[512];" not in s:
+              s=s.replace("extern char* g_pszStorage;", "extern char* g_pszStorage;\nextern char g_dexinStorage[512];")
+          p.write_text(s, encoding="utf-8")
+
+          p = root / "app/src/main/cpp/samp/game/hooks.cpp"
+          s = p.read_text(encoding="utf-8-sig")
+          old='''    g_pszStorage = (char*)(g_libGTASA + (VER_x32 ? 0x6D687C : 0x8B46A8)); // StorageRootBuffer\n\n    ReadSettingFile();'''
+          new='''    const char* ext = getenv("EXTERNAL_STORAGE");\n    if (!ext || !ext[0]) ext = "/storage/emulated/0";\n    snprintf(g_dexinStorage, sizeof(g_dexinStorage), "%s/DexinMobile/", ext);\n    g_pszStorage = g_dexinStorage;\n    FLog("Dexin storage root: %s", g_pszStorage);\n\n    ReadSettingFile();'''
+          if old in s: s=s.replace(old,new)
+          p.write_text(s, encoding="utf-8")
+
+          p = root / "app/src/main/cpp/samp/game/Pickups.cpp"
+          s = p.read_text(encoding="utf-8-sig")
+          if '#include "Models/ModelInfo.h"' not in s: s=s.replace('#include "Camera.h"\n', '#include "Camera.h"\n#include "Models/ModelInfo.h"\n')
+          old='''            if (!pickup.m_nFlags.bDisabled && !pickup.m_pObject) {\n                pickup.GiveUsAPickUpObject(&pickup.m_pObject, -1);\n\n                if (auto& obj = pickup.m_pObject; obj) {\n                    CWorld::Add(obj);\n                }\n            }'''
+          new='''            if (!pickup.m_nFlags.bDisabled && !pickup.m_pObject) {\n                auto* modelInfo = CModelInfo::GetModelInfo(pickup.m_nModelIndex);\n                if (!modelInfo || !modelInfo->GetColModel()) {\n                    FLog("Skipping pickup model %d: model/collision data unavailable", pickup.m_nModelIndex);\n                    continue;\n                }\n                pickup.GiveUsAPickUpObject(&pickup.m_pObject, -1);\n                if (auto& obj = pickup.m_pObject; obj) CWorld::Add(obj);\n            }'''
+          if old in s: s=s.replace(old,new)
+          p.write_text(s, encoding="utf-8")
+          PY
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -296,7 +324,6 @@ jobs:
           [ -n "$APK" ] || { echo 'ERROR: release APK not found'; exit 1; }
           cp "$APK" DexinMobile.apk
           ls -lh DexinMobile.apk
-          file DexinMobile.apk
 
       - name: Upload actual APK
         if: success()
@@ -324,4 +351,4 @@ jobs:
         with:
           name: DexinMobile-build-log
           path: /tmp/gradle-build.log
-          retention-days: 7
+          retention-days: 14
