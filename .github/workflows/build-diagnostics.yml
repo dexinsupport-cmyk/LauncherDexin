@@ -1,0 +1,41 @@
+name: Build Diagnostics
+
+on:
+  workflow_run:
+    workflows: ["Build Dexin Mobile APK"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  diagnostics:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Collect failed build logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run view "$RUN_ID" --repo "${{ github.repository }}" --log-failed > failed-build.log 2>&1 || true
+          {
+            echo "## Dexin Mobile — failed Build Release APK log"
+            echo
+            echo "Source workflow run: $RUN_ID"
+            echo
+            echo '```text'
+            tail -n 250 failed-build.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload diagnostic log
+        uses: actions/upload-artifact@v4
+        with:
+          name: DexinMobile-failed-build-log-${{ github.event.workflow_run.id }}
+          path: failed-build.log
+          if-no-files-found: warn
+          retention-days: 14
