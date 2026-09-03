@@ -37,7 +37,6 @@ jobs:
             [ "${BASH_REMATCH[1]}" -eq "$expected" ] || { echo "ERROR: expected Part${expected}, found $b"; exit 1; }
             expected=$((expected+1))
           done
-          echo "Parts: ${#PARTS[@]}"
           rm -f source.zip
           cat "${PARTS[@]}" > source.zip
           unzip -t source.zip
@@ -52,10 +51,10 @@ jobs:
           G="$(find _source -type f -name gradlew -print -quit)"
           [ -n "$G" ] || { echo 'ERROR: gradlew not found after extraction'; exit 1; }
           D="$(dirname "$G")"
+          D="$(cd "$D" && pwd)"
           echo "PROJECT_DIR=$D" >> "$GITHUB_ENV"
           sed -i 's/\r$//' "$D/gradlew"
           chmod +x "$D/gradlew"
-          echo "PROJECT_DIR=$D"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -80,39 +79,24 @@ jobs:
           set -euo pipefail
           C="$PROJECT_DIR/app/src/main/cpp"
           [ -d "$C" ] || { echo "ERROR: native source directory missing: $C"; exit 1; }
-
-          # Linux is case-sensitive. Fix only the include spellings that are
-          # known to differ from the extracted source filenames.
           RGBA_SOURCE="$(find "$C" -type f -iname 'rgba.h' -print -quit || true)"
           [ -n "$RGBA_SOURCE" ] || { echo 'ERROR: rgba.h is missing'; find "$C" -type f -iname '*rgba*' -print | sort; exit 1; }
-          echo "RGBA source: $RGBA_SOURCE"
-
           PLAYER_SOURCE="$(find "$C" -type f -iname 'playertablist.h' -print -quit || true)"
           [ -n "$PLAYER_SOURCE" ] || { echo 'ERROR: playertablist.h is missing'; find "$C" -type f -iname '*playertablist*' -print | sort; exit 1; }
-          echo "PlayerTabList source: $PLAYER_SOURCE"
-
-          # Provide the exact case-sensitive names used by the source.
           RGBA_DIR="$(dirname "$RGBA_SOURCE")"
           [ "$(basename "$RGBA_SOURCE")" = 'RGBA.h' ] || cp -f "$RGBA_SOURCE" "$RGBA_DIR/RGBA.h"
-
           PLAYER_DIR="$(dirname "$PLAYER_SOURCE")"
           [ "$(basename "$PLAYER_SOURCE")" = 'playerTabList.h' ] || cp -f "$PLAYER_SOURCE" "$PLAYER_DIR/playerTabList.h"
-
-          # gui.h includes samp_widgets/playerTabList.h relative to gui/.
           while IFS= read -r -d '' GUI; do
             GUI_DIR="$(dirname "$GUI")"
             mkdir -p "$GUI_DIR/samp_widgets"
             cp -f "$PLAYER_SOURCE" "$GUI_DIR/samp_widgets/playerTabList.h"
           done < <(find "$C" -type f -path '*/gui/gui.h' -print0)
-
-          # rgba.cpp includes RGBA.h from game/. Put the exact header beside it.
           while IFS= read -r -d '' CPP; do
             if grep -Eq '#[[:space:]]*include[[:space:]]*[<"]RGBA\.h[>"]' "$CPP"; then
               cp -f "$RGBA_SOURCE" "$(dirname "$CPP")/RGBA.h"
             fi
           done < <(find "$C" -type f \( -name '*.cpp' -o -name '*.c' \) -print0)
-
-          # Normalize RakNet directory spelling without creating duplicate trees.
           find "$C" -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -print0 |
             xargs -0 -r sed -i \
               -e 's|vendor/RakNet/|vendor/raknet/|g' \
@@ -120,63 +104,34 @@ jobs:
               -e 's|../../vendor/RakNet/|../../vendor/raknet/|g' \
               -e 's|"RakNet/|"raknet/|g' \
               -e 's|<RakNet/|<raknet/|g'
-
-          # armhook/link.h must be safe when reached through multiple include paths.
           while IFS= read -r -d '' P; do
             if ! grep -qE '^#pragma once[[:space:]]*$' "$P"; then
               T="${P}.tmp"
               { printf '%s\n' '#pragma once'; cat "$P"; } > "$T"
               mv "$T" "$P"
-              echo "Added include guard: $P"
             fi
           done < <(find "$C" -type f -path '*/armhook/link.h' -print0)
-
-          echo '=== Native header check ==='
-          find "$C" -type f \( -name 'RGBA.h' -o -name 'playerTabList.h' \) -print | sort
-          echo '=== armhook/link.h ==='
-          find "$C" -type f -path '*/armhook/link.h' -print -exec sed -n '1,20p' {} \;
 
       - name: Prepare release signing
         shell: bash
         run: |
           set -euo pipefail
-          KEYSTORE="$PROJECT_DIR/keystore_playmarket2.jks"
-          if [ ! -f "$KEYSTORE" ]; then
-            keytool -genkeypair -v \
-              -keystore "$KEYSTORE" \
-              -storepass 'dexinmobile' \
-              -keypass 'dexinmobile' \
-              -alias 'dexinmobile' \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname 'CN=Dexin Mobile, OU=Dexin Mobile, O=Dexin Mobile, L=Unknown, ST=Unknown, C=DE'
-          fi
-          [ -s "$KEYSTORE" ] || { echo 'ERROR: release keystore was not created'; exit 1; }
-          echo "Release keystore ready: $KEYSTORE"
-
-          # Force the release variant to use the generated keystore, even if
-          # the original project refers to a removed/local Play Market key.
+          # Do not depend on the missing local Play Market keystore.
+          # Release is signed with the Android debug signing config only for CI output.
           cat > /tmp/force-release-signing.gradle <<'GRADLE'
-          allprojects {
-              afterEvaluate { project ->
-                  def android = project.extensions.findByName('android')
-                  if (android != null) {
-                      def release = android.signingConfigs.findByName('release')
-                      if (release != null) {
-                          release.storeFile = project.file(System.getenv('DEXIN_RELEASE_KEYSTORE'))
-                          release.storePassword = System.getenv('DEXIN_RELEASE_STORE_PASSWORD')
-                          release.keyAlias = System.getenv('DEXIN_RELEASE_KEY_ALIAS')
-                          release.keyPassword = System.getenv('DEXIN_RELEASE_KEY_PASSWORD')
-                      }
-                  }
-              }
-          }
-          GRADLE
-          echo "DEXIN_RELEASE_KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
-          echo 'DEXIN_RELEASE_STORE_PASSWORD=dexinmobile' >> "$GITHUB_ENV"
-          echo 'DEXIN_RELEASE_KEY_ALIAS=dexinmobile' >> "$GITHUB_ENV"
-          echo 'DEXIN_RELEASE_KEY_PASSWORD=dexinmobile' >> "$GITHUB_ENV"
+allprojects {
+    afterEvaluate { project ->
+        def android = project.extensions.findByName('android')
+        if (android != null) {
+            def release = android.signingConfigs.findByName('release')
+            def debug = android.signingConfigs.findByName('debug')
+            if (release != null && debug != null) {
+                release.initWith(debug)
+            }
+        }
+    }
+}
+GRADLE
           echo 'DEXIN_SIGNING_INIT=/tmp/force-release-signing.gradle' >> "$GITHUB_ENV"
 
       - name: Build Release APK
