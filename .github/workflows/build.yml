@@ -38,6 +38,7 @@ jobs:
             expected=$((expected+1))
           done
           echo "Parts: ${#PARTS[@]}"
+          rm -f source.zip
           cat "${PARTS[@]}" > source.zip
           unzip -t source.zip
           rm -rf _source
@@ -80,57 +81,30 @@ jobs:
           C="$PROJECT_DIR/app/src/main/cpp"
           [ -d "$C" ] || { echo "ERROR: native source directory missing: $C"; exit 1; }
 
-          python3 - "$C" <<'PY'
-          import os, re, shutil, sys
-          root=sys.argv[1]
-          files={}
-          for dp,_,fn in os.walk(root):
-              for f in fn:
-                  files.setdefault(f.lower(), []).append(os.path.join(dp,f))
+          # Fix the known Linux case-sensitive header names without using an
+          # embedded Python heredoc. This keeps the workflow itself POSIX-safe.
+          for src in $(find "$C" -type f -iname 'playertablist.h' -print); do
+            dst="$(dirname "$src")/playerTabList.h"
+            [ -e "$dst" ] || cp -f "$src" "$dst"
+          done
+          for src in $(find "$C" -type f -iname 'rgba.h' -print); do
+            dst="$(dirname "$src")/RGBA.h"
+            [ -e "$dst" ] || cp -f "$src" "$dst"
+          done
 
-          inc=re.compile(r'#include\s*[<"]([^>"]+)[>"]')
-          source_ext=('.c','.cc','.cpp','.cxx','.h','.hpp')
-          for dp,_,fn in os.walk(root):
-              for f in fn:
-                  if not f.endswith(source_ext): continue
-                  p=os.path.join(dp,f)
-                  try: text=open(p,encoding='utf-8',errors='ignore').read()
-                  except OSError: continue
-                  for m in inc.finditer(text):
-                      name=m.group(1)
-                      base=os.path.basename(name)
-                      candidates=files.get(base.lower(),[])
-                      if not candidates: continue
-                      exact=[x for x in candidates if os.path.basename(x)==base]
-                      if exact: continue
-                      src=candidates[0]
-                      dst=os.path.join(dp,os.path.dirname(name),base)
-                      os.makedirs(os.path.dirname(dst),exist_ok=True)
-                      if not os.path.exists(dst): shutil.copy2(src,dst)
-                      print(f'case-alias: {src} -> {dst}')
+          # The previous workflow failed before compilation because its
+          # heredoc was malformed. Use a direct, deterministic guard here.
+          while IFS= read -r -d '' p; do
+            if ! grep -qE '^#pragma once[[:space:]]*$' "$p"; then
+              tmp="${p}.tmp"
+              { echo '#pragma once'; cat "$p"; } > "$tmp"
+              mv "$tmp" "$p"
+              echo "added include guard: $p"
+            else
+              echo "include guard already present: $p"
+            fi
+          done < <(find "$C" -type f -path '*/armhook/link.h' -print0)
 
-          # armhook/link.h defines CLink. The source is included from more than one
-          # translation-unit/header path and has no effective include guard. On Linux
-          # this produces a hard C++ redefinition error. Add a real guard only to this
-          # exact header; do not change the CLink implementation itself.
-          link_candidates=[]
-          for dp,_,fn in os.walk(root):
-              for f in fn:
-                  if f.lower() == 'link.h' and os.path.basename(dp).lower() == 'armhook':
-                      link_candidates.append(os.path.join(dp,f))
-          if not link_candidates:
-              print('WARNING: armhook/link.h not found')
-          for p in link_candidates:
-              with open(p,'r',encoding='utf-8',errors='ignore') as fh:
-                  text=fh.read()
-              if '#pragma once' not in text.split('\n',3)[:3]:
-                  with open(p,'w',encoding='utf-8',newline='') as fh:
-                      fh.write('#pragma once\n' + text)
-                  print(f'added include guard: {p}')
-              else:
-                  print(f'include guard already present: {p}')
-
-          echo=''
           echo '=== armhook/link.h ==='
           find "$C" -type f -path '*/armhook/link.h' -print -exec sed -n '1,35p' {} \;
           echo '=== required headers ==='
