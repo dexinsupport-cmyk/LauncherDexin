@@ -40,20 +40,13 @@ jobs:
           }
 
           expected=1
-
           for p in "${PARTS[@]}"; do
             b="$(basename "$p")"
-
-            [[ "$b" =~ [Pp]art([0-9]+) ]] || {
-              echo "ERROR: invalid source part: $b"
-              exit 1
-            }
-
+            [[ "$b" =~ [Pp]art([0-9]+) ]] || exit 1
             [ "${BASH_REMATCH[1]}" -eq "$expected" ] || {
               echo "ERROR: expected Part${expected}, found $b"
               exit 1
             }
-
             expected=$((expected + 1))
           done
 
@@ -61,33 +54,22 @@ jobs:
           printf ' - %s\n' "${PARTS[@]}"
 
           cat "${PARTS[@]}" > source.zip
-
           unzip -t source.zip
 
           rm -rf _source
           mkdir -p _source
-
           unzip -q source.zip -d _source
 
       - name: Locate Gradle project
         shell: bash
         run: |
           set -euo pipefail
-
           G="$(find _source -type f -name gradlew -print -quit)"
-
-          [ -n "$G" ] || {
-            echo "ERROR: gradlew not found"
-            exit 1
-          }
-
+          [ -n "$G" ] || { echo "ERROR: gradlew not found"; exit 1; }
           D="$(cd "$(dirname "$G")" && pwd)"
-
           echo "PROJECT_DIR=$D" >> "$GITHUB_ENV"
-
           sed -i 's/\r$//' "$D/gradlew"
           chmod +x "$D/gradlew"
-
           echo "Gradle project: $D"
 
       - name: Set up JDK 17
@@ -104,9 +86,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-
           sdkmanager \
             "platform-tools" \
             "platforms;android-34" \
@@ -121,175 +101,102 @@ jobs:
 
           C="$PROJECT_DIR/app/src/main/cpp"
           S="$C/samp"
+          REAL_RAKNET="$S/vendor/raknet"
+          MIRROR_RAKNET="$S/vendor/RakNet"
 
-          echo "Native source: $C"
+          test -d "$S" || { echo "ERROR: samp native directory not found: $S"; exit 1; }
+          test -d "$REAL_RAKNET" || { echo "ERROR: vendor/raknet not found: $REAL_RAKNET"; exit 1; }
 
-          mkdir -p \
-            "$S/gui/samp_widgets" \
-            "$S/game" \
-            "$S/vendor/RakNet"
+          mkdir -p "$S/gui/samp_widgets" "$S/game"
 
           copy_case_insensitive() {
             local pattern="$1"
             local target="$2"
             local found
-
             found="$(find "$C" -type f -iname "$pattern" -print -quit || true)"
-
             [ -n "$found" ] || {
               echo "ERROR: required header '$pattern' was not found"
               exit 1
             }
-
-            echo "Copying:"
-            echo "  $found"
-            echo "  -> $target"
-
             cp -f "$found" "$target"
           }
 
-          copy_case_insensitive \
-            "playerTabList.h" \
-            "$S/gui/samp_widgets/playerTabList.h"
+          copy_case_insensitive "playerTabList.h" "$S/gui/samp_widgets/playerTabList.h"
+          copy_case_insensitive "RGBA.h" "$S/game/RGBA.h"
 
-          copy_case_insensitive \
-            "RGBA.h" \
-            "$S/game/RGBA.h"
+          # Network.h includes ../vendor/RakNet/*.h on Linux, while the real
+          # source tree is vendor/raknet. The uppercase compatibility tree
+          # MUST contain headers only. If it contains .cpp files, CMake can
+          # compile RakNet twice and the linker reports duplicate symbols.
+          rm -rf "$MIRROR_RAKNET"
+          mkdir -p "$MIRROR_RAKNET"
 
-          #
-          # IMPORTANT:
-          #
-          # Network.h uses:
-          #
-          #   ../vendor/RakNet/RakClient.h
-          #
-          # The real directory is:
-          #
-          #   vendor/raknet
-          #
-          # Linux is case-sensitive.
-          #
-          # We therefore mirror ONLY HEADER FILES into:
-          #
-          #   vendor/RakNet
-          #
-          # We do NOT copy .cpp files.
-          #
-          # This prevents duplicate-symbol errors from CMake.
-          #
-
-          REAL_RAKNET="$S/vendor/raknet"
-          MIRROR_RAKNET="$S/vendor/RakNet"
-
-          [ -d "$REAL_RAKNET" ] || {
-            echo "ERROR: real RakNet directory not found:"
-            echo "$REAL_RAKNET"
-            exit 1
-          }
-
-          echo "Mirroring RakNet headers..."
-
-          find "$REAL_RAKNET" -type f \
-            \
-              -iname "*.h" \
-              -o -iname "*.hpp" \
-              -o -iname "*.inl" \
-            \
-            -print0 |
+          # Copy every header/inl from the real tree while preserving its
+          # relative directory layout. Never copy C/C++ implementation files.
           while IFS= read -r -d '' src; do
-
             rel="${src#"$REAL_RAKNET"/}"
             dst="$MIRROR_RAKNET/$rel"
-
             mkdir -p "$(dirname "$dst")"
-
             cp -f "$src" "$dst"
+          done < <(
+            find "$REAL_RAKNET" -type f \
+              \( -iname '*.h' -o -iname '*.hpp' -o -iname '*.inl' \) \
+              -print0
+          )
 
+          # Required headers. RakPeer.h itself includes Export.h.
+          for h in RakClient.h RakPeer.h Export.h BitStream.h RakNetTypes.h; do
+            test -f "$MIRROR_RAKNET/$h" || {
+              echo "ERROR: required RakNet header missing: $h"
+              exit 1
+            }
           done
 
-          #
-          # Verify the exact headers needed by Network.h.
-          #
-
-          test -f "$MIRROR_RAKNET/RakClient.h" || {
-            echo "ERROR: RakClient.h missing"
-            exit 1
-          }
-
-          test -f "$MIRROR_RAKNET/RakPeer.h" || {
-            echo "ERROR: RakPeer.h missing"
-            exit 1
-          }
-
-          #
-          # RakPeer.h includes Export.h.
-          # Search case-insensitively and make sure the Linux-visible
-          # filename is exactly Export.h.
-          #
-
-          EXPORT="$(find "$REAL_RAKNET" -type f -iname "Export.h" -print -quit || true)"
-
-          if [ -n "$EXPORT" ]; then
-            cp -f "$EXPORT" "$MIRROR_RAKNET/Export.h"
-          fi
-
-          test -f "$MIRROR_RAKNET/Export.h" || {
-            echo "ERROR: Export.h missing from RakNet mirror"
-            echo "Searching for possible variants:"
-            find "$REAL_RAKNET" -type f \
-              -iname "*export*.h" -o -iname "*Export*.h" \
-              -print || true
-            exit 1
-          }
-
-          echo
-          echo "RakNet headers available:"
-          find "$MIRROR_RAKNET" -type f \
-            -name "*.h" -o -name "*.hpp" -o -name "*.inl" |
-            sort |
-            head -n 200
-
-          echo
-          echo "Checking for accidental C++ source duplication..."
-
+          # Safety check: compatibility tree must never contain implementation files.
           if find "$MIRROR_RAKNET" -type f \
-            -name "*.cpp" -o -name "*.cc" -o -name "*.cxx" |
-            grep -q .; then
-
-            echo "ERROR: C++ source files were copied into RakNet mirror!"
+            \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' -o -name '*.c' \) \
+            -print -quit | grep -q .; then
+            echo "ERROR: implementation file found in vendor/RakNet"
             find "$MIRROR_RAKNET" -type f \
-              -name "*.cpp" -o -name "*.cc" -o -name "*.cxx"
+              \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' -o -name '*.c' \)
             exit 1
           fi
 
-          echo
-          echo "Required RakNet headers:"
-          ls -la \
-            "$MIRROR_RAKNET/RakClient.h" \
-            "$MIRROR_RAKNET/RakPeer.h" \
-            "$MIRROR_RAKNET/Export.h"
+          echo "RakNet compatibility headers prepared."
+          ls -la "$MIRROR_RAKNET" | head -n 100
 
-      - name: Native source diagnostics
+      - name: Remove native build caches
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf "$PROJECT_DIR/app/.cxx"
+          rm -rf "$PROJECT_DIR/app/build"
+          echo "Removed CMake/Gradle native build caches."
 
-          C="$PROJECT_DIR/app/src/main/cpp"
+      - name: Verify RakNet source duplication
+        shell: bash
+        run: |
+          set -euo pipefail
+          C="$PROJECT_DIR/app/src/main/cpp/samp"
 
-          echo "Checking native include compatibility..."
+          echo "RakNet implementation files:"
+          find "$C/vendor" -type f \
+            \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) \
+            | sort | sed -n '1,250p'
 
-          test -f "$C/samp/gui/samp_widgets/playerTabList.h"
-          test -f "$C/samp/game/RGBA.h"
-          test -f "$C/samp/vendor/RakNet/RakClient.h"
-          test -f "$C/samp/vendor/RakNet/RakPeer.h"
-          test -f "$C/samp/vendor/RakNet/Export.h"
-
-          test ! -L "$C/samp/vendor/RakNet" || {
-            echo "ERROR: vendor/RakNet must not be a symlink"
+          echo
+          echo "Checking uppercase compatibility tree..."
+          if find "$C/vendor/RakNet" -type f \
+            \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) \
+            | grep -q .; then
+            echo "ERROR: duplicate RakNet implementation sources detected"
             exit 1
-          }
+          fi
 
-          echo "OK: required Linux headers exist."
+          test -f "$C/vendor/RakNet/RakClient.h"
+          test -f "$C/vendor/RakNet/RakPeer.h"
+          test -f "$C/vendor/RakNet/Export.h"
+          echo "OK: RakNet compatibility directory contains headers only."
 
       - name: Build Release APK
         id: gradle_build
@@ -298,7 +205,60 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-
           : > /tmp/gradle-build.log
+          ./gradlew --no-daemon --stacktrace --warning-mode all clean 2>&1 | tee -a /tmp/gradle-build.log
+          s=${PIPESTATUS[0]}
+          if [ "$s" -eq 0 ]; then
+            ./gradlew --no-daemon --stacktrace --warning-mode all :app:assembleRelease 2>&1 | tee -a /tmp/gradle-build.log
+            s=${PIPESTATUS[0]}
+          fi
+          echo "GRADLE_EXIT=$s" >> /tmp/gradle-build.log
+          exit "$s"
 
-          echo "
+      - name: Show Gradle diagnostics in Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## Dexin Mobile — Build diagnostics'
+            echo
+            echo "**Build Release APK:** ${{ steps.gradle_build.outcome }}"
+            echo
+            echo '```text'
+            grep -nEi 'error:|fatal error:|FAILED:|FAILURE:|Execution failed|What went wrong|Caused by:|Could not find|Could not resolve|undefined reference|duplicate class|duplicate symbol|GRADLE_EXIT=' /tmp/gradle-build.log | tail -n 250 || true
+            echo '```'
+            echo
+            echo '### Last 300 lines'
+            echo '```text'
+            tail -n 300 /tmp/gradle-build.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DexinMobile-gradle-diagnostics
+          path: /tmp/gradle-build.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail if Gradle failed
+        if: steps.gradle_build.outcome != 'success'
+        run: exit 1
+
+      - name: Copy APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find "$PROJECT_DIR/app/build/outputs/apk/release" -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          [ -n "$APK" ] || { echo "ERROR: APK was not generated"; exit 1; }
+          cp "$APK" DexinMobile.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DexinMobile-APK
+          path: DexinMobile.apk
+          if-no-files-found: error
+          retention-days: 14
