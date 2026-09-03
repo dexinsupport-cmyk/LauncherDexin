@@ -1,0 +1,114 @@
+name: Build Dexin Mobile APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Assemble source parts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t PARTS < <(find . -maxdepth 2 -type f -name '*.zip' -print0 | while IFS= read -r -d '' f; do b="$(basename "$f")"; if [[ "$b" =~ Part([0-9]+)(-[^/]*)?\.zip$ ]]; then printf '%d\t%s\n' "${BASH_REMATCH[1]}" "$f"; fi; done | sort -n -k1,1 | cut -f2-)
+          [ "${#PARTS[@]}" -gt 0 ] || { echo 'ERROR: no Part*.zip files found'; exit 1; }
+          expected=1
+          for p in "${PARTS[@]}"; do b="$(basename "$p")"; [[ "$b" =~ Part([0-9]+) ]] || exit 1; [ "${BASH_REMATCH[1]}" -eq "$expected" ] || { echo "ERROR: expected Part${expected}, found $b"; exit 1; }; expected=$((expected+1)); done
+          cat "${PARTS[@]}" > source.zip
+          unzip -t source.zip
+          rm -rf _source && mkdir _source && unzip -q source.zip -d _source
+      - name: Locate Gradle project
+        shell: bash
+        run: |
+          set -euo pipefail
+          G="$(find _source -type f -name gradlew -print -quit)"
+          [ -n "$G" ] || { echo 'ERROR: gradlew not found'; exit 1; }
+          D="$(dirname "$G")"; echo "PROJECT_DIR=$D" >> "$GITHUB_ENV"; sed -i 's/\r$//' "$D/gradlew"; chmod +x "$D/gradlew"
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17', cache: gradle }
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager 'platform-tools' 'platforms;android-34' 'build-tools;34.0.0' 'ndk;26.2.11394342' 'cmake;3.22.1'
+      - name: Fix Linux native include paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          C="$PROJECT_DIR/app/src/main/cpp"
+          S="$C/samp"
+          mkdir -p "$S/samp_widgets"
+          TARGET="$S/samp_widgets/playerTabList.h"
+          FOUND="$(find "$C" -type f -iname 'playerTabList.h' -print -quit || true)"
+          [ -n "$FOUND" ] || FOUND="$(find "$C" -type f -iname 'playertablist.h' -print -quit || true)"
+          if [ -n "$FOUND" ] && [ "$FOUND" != "$TARGET" ]; then cp -f "$FOUND" "$TARGET"; fi
+          if [ ! -f "$TARGET" ]; then
+            echo 'ERROR: playerTabList.h is genuinely missing from the assembled source.'
+            find "$C" -type f -iname '*playertablist*' -print || true
+            exit 1
+          fi
+          echo "Using $TARGET"
+          while IFS= read -r f; do
+            base="$(basename "$f")"
+            lower="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')"
+            if [ "$base" != "$lower" ]; then
+              case "$lower" in
+                rgba.h|playertablist.h) : ;;
+                *) continue ;;
+              esac
+            fi
+          done < <(find "$C" -type f -name '*.h' -print)
+      - name: Native source diagnostics
+        shell: bash
+        run: |
+          C="$PROJECT_DIR/app/src/main/cpp"
+          echo '=== playerTabList target ==='; ls -l "$C/samp/samp_widgets/playerTabList.h"
+          echo '=== RGBA headers ==='; find "$C" -type f -iname '*rgba*.h' -print | sort || true
+          echo '=== relevant includes ==='; grep -RIn --include='*.cpp' --include='*.c' --include='*.h' --include='*.hpp' -E '#include[[:space:]]*[<"](.*RGBA\.h|.*rgba\.h|.*playerTabList\.h|.*playertablist\.h)' "$C" || true
+      - name: Build Release APK
+        id: gradle_build
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          : > /tmp/gradle-build.log
+          ./gradlew --no-daemon --stacktrace --warning-mode all clean 2>&1 | tee -a /tmp/gradle-build.log
+          s=${PIPESTATUS[0]}
+          if [ "$s" -eq 0 ]; then ./gradlew --no-daemon --stacktrace --warning-mode all :app:assembleRelease 2>&1 | tee -a /tmp/gradle-build.log; s=${PIPESTATUS[0]}; fi
+          echo "GRADLE_EXIT=$s" >> /tmp/gradle-build.log
+          exit "$s"
+      - name: Show Gradle diagnostics in Summary
+        if: always()
+        shell: bash
+        run: |
+          { echo '## Dexin Mobile — Build diagnostics'; echo; echo "**Build Release APK:** ${{ steps.gradle_build.outcome }}"; echo; echo '```text'; grep -nEi 'error:|fatal error:|FAILED:|FAILURE:|Execution failed|What went wrong|Caused by:|Could not find|Could not resolve|undefined reference|duplicate class|GRADLE_EXIT=' /tmp/gradle-build.log | tail -n 200 || true; echo '```'; echo; echo '### Last 300 lines'; echo '```text'; tail -n 300 /tmp/gradle-build.log || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: DexinMobile-gradle-diagnostics, path: /tmp/gradle-build.log, if-no-files-found: warn, retention-days: 14 }
+      - name: Fail if Gradle failed
+        if: steps.gradle_build.outcome != 'success'
+        run: exit 1
+      - name: Copy APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find "$PROJECT_DIR/app/build/outputs/apk/release" -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          [ -n "$APK" ] || { echo 'ERROR: APK was not generated'; exit 1; }
+          cp "$APK" DexinMobile.apk
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with: { name: DexinMobile-APK, path: DexinMobile.apk, if-no-files-found: error, retention-days: 14 }
