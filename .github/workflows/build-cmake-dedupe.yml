@@ -1,0 +1,145 @@
+name: Build Dexin Mobile APK - CMake Deduped
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assemble source parts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t PARTS < <(
+            for n in 1 2 3; do
+              f="$(find . -maxdepth 2 -type f \( -name "DexinMobile_Verify_SourcePart${n}.zip" -o -name "*SourcePart${n}.zip" \) -print -quit)"
+              [ -n "$f" ] || { echo "ERROR: SourcePart${n}.zip not found"; exit 1; }
+              printf '%s\n' "$f"
+            done
+          )
+          cat "${PARTS[@]}" > source.zip
+          unzip -t source.zip
+          rm -rf _source
+          mkdir _source
+          unzip -q source.zip -d _source
+
+      - name: Locate Gradle project
+        shell: bash
+        run: |
+          set -euo pipefail
+          G="$(find _source -type f -name gradlew -print -quit)"
+          [ -n "$G" ] || exit 1
+          D="$(dirname "$G")"
+          D="$(cd "$D" && pwd)"
+          echo "PROJECT_DIR=$D" >> "$GITHUB_ENV"
+          sed -i 's/\r$//' "$D/gradlew"
+          chmod +x "$D/gradlew"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install native tools
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.2.11394342" "cmake;3.22.1"
+
+      - name: Deduplicate native source tree and CMake target
+        shell: bash
+        run: |
+          set -euo pipefail
+          C="$PROJECT_DIR/app/src/main/cpp"
+          S="$C/samp"
+          R="$S/vendor/raknet"
+          M="$S/vendor/RakNet"
+          test -d "$S"
+          test -d "$R"
+
+          # Compatibility directory is headers only.
+          rm -rf "$M"
+          mkdir -p "$M"
+          while IFS= read -r -d '' f; do
+            rel="${f#"$R"/}"
+            mkdir -p "$M/$(dirname "$rel")"
+            cp -f "$f" "$M/$rel"
+          done < <(find "$R" -type f \( -iname '*.h' -o -iname '*.hpp' -o -iname '*.inl' \) -print0)
+          find "$M" -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' \) -delete
+
+          # A duplicate symbol can also come from a second copy at a different
+          # path. Keep the canonical RakNet implementation only.
+          for n in BitStream.cpp DS_ByteQueue.cpp PluginInterface.cpp PluginInterface2.cpp RakPeer.cpp RakClient.cpp RakNetCommandParser.cpp NetworkTypes.cpp DS_HuffmanEncodingTree.cpp DS_Table.cpp AsynchronousFileIO.cpp CheckSum.cpp GetTime.cpp HuffmanEncodingTree.cpp StringCompressor.cpp; do
+            while IFS= read -r -d '' f; do
+              case "$f" in "$R"/*) ;; *) echo "Removing duplicate: $f"; rm -f "$f" ;; esac
+            done < <(find "$S" -type f -name "$n" -print0)
+          done
+
+          # Inject a final target-level path dedupe without replacing any GLOB.
+          for F in "$S/CMakeLists.txt" "$C/CMakeLists.txt"; do
+            [ -f "$F" ] || continue
+            if ! grep -q DEXIN_FINAL_SOURCE_DEDUPE "$F"; then
+              cat >> "$F" <<'CMAKE'
+
+# DEXIN_FINAL_SOURCE_DEDUPE
+if(TARGET samp)
+  get_target_property(_dexin_sources samp SOURCES)
+  if(_dexin_sources)
+    list(REMOVE_DUPLICATES _dexin_sources)
+    set_property(TARGET samp PROPERTY SOURCES "${_dexin_sources}")
+    list(LENGTH _dexin_sources _dexin_count)
+    message(STATUS "DEXIN: unique samp SOURCES = ${_dexin_count}")
+  endif()
+endif()
+CMAKE
+            fi
+          done
+
+          echo '--- RakNet duplicate check ---'
+          find "$S" -type f \( -name 'BitStream.cpp' -o -name 'DS_ByteQueue.cpp' -o -name 'PluginInterface.cpp' -o -name 'PluginInterface2.cpp' -o -name 'RakPeer.cpp' -o -name 'RakClient.cpp' \) -print | sort
+
+      - name: Clean native build
+        run: rm -rf "$PROJECT_DIR/app/.cxx" "$PROJECT_DIR/app/build"
+
+      - name: Build Release APK
+        id: build
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon --stacktrace clean 2>&1 | tee /tmp/gradle.log
+          s=${PIPESTATUS[0]}
+          if [ "$s" -eq 0 ]; then ./gradlew --no-daemon --stacktrace :app:assembleRelease 2>&1 | tee -a /tmp/gradle.log; s=${PIPESTATUS[0]}; fi
+          echo "GRADLE_EXIT=$s" >> /tmp/gradle.log
+          exit "$s"
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DexinMobile-cmake-diagnostics
+          path: /tmp/gradle.log
+          if-no-files-found: warn
+
+      - name: Fail if build failed
+        if: steps.build.outcome != 'success'
+        run: exit 1
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DexinMobile-APK
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
