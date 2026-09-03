@@ -74,41 +74,44 @@ jobs:
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager 'platform-tools' 'platforms;android-34' 'build-tools;34.0.0' 'ndk;26.2.11394342' 'cmake;3.22.1'
 
-      - name: Fix Linux case sensitivity and CLink redefinition
+      - name: Fix Linux native include paths
         shell: bash
         run: |
           set -euo pipefail
           C="$PROJECT_DIR/app/src/main/cpp"
           [ -d "$C" ] || { echo "ERROR: native source directory missing: $C"; exit 1; }
 
-          # Fix the known Linux case-sensitive header names without using an
-          # embedded Python heredoc. This keeps the workflow itself POSIX-safe.
-          for src in $(find "$C" -type f -iname 'playertablist.h' -print); do
-            dst="$(dirname "$src")/playerTabList.h"
-            [ -e "$dst" ] || cp -f "$src" "$dst"
-          done
-          for src in $(find "$C" -type f -iname 'rgba.h' -print); do
-            dst="$(dirname "$src")/RGBA.h"
-            [ -e "$dst" ] || cp -f "$src" "$dst"
-          done
+          # Linux is case-sensitive. The source uses RakNet in several include
+          # statements while the checked-out vendor directory is raknet.
+          # Normalize only native-source include text; do not rename source files.
+          find "$C" -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -print0 |
+            xargs -0 -r sed -i \
+              -e 's|vendor/RakNet/|vendor/raknet/|g' \
+              -e 's|../vendor/RakNet/|../vendor/raknet/|g' \
+              -e 's|../../vendor/RakNet/|../../vendor/raknet/|g' \
+              -e 's|"RakNet/|"raknet/|g' \
+              -e 's|<RakNet/|<raknet/|g'
 
-          # The previous workflow failed before compilation because its
-          # heredoc was malformed. Use a direct, deterministic guard here.
+          # Keep the known CLink header safe if it is included more than once.
           while IFS= read -r -d '' p; do
             if ! grep -qE '^#pragma once[[:space:]]*$' "$p"; then
               tmp="${p}.tmp"
               { echo '#pragma once'; cat "$p"; } > "$tmp"
               mv "$tmp" "$p"
               echo "added include guard: $p"
-            else
-              echo "include guard already present: $p"
             fi
           done < <(find "$C" -type f -path '*/armhook/link.h' -print0)
 
+          # Replace deprecated JCenter in the extracted Gradle project.
+          find "$PROJECT_DIR" -type f \( -name '*.gradle' -o -name '*.gradle.kts' \) -print0 |
+            xargs -0 -r sed -i 's/jcenter()/mavenCentral()/g'
+
+          echo '=== RakNet directories ==='
+          find "$C/samp/vendor" -maxdepth 2 -type d -iname '*raknet*' -print 2>/dev/null || true
+          echo '=== Network.h include ==='
+          grep -RIn --include='Network.h' 'RakNet\|raknet' "$C" || true
           echo '=== armhook/link.h ==='
-          find "$C" -type f -path '*/armhook/link.h' -print -exec sed -n '1,35p' {} \;
-          echo '=== required headers ==='
-          find "$C" -type f \( -iname 'RGBA.h' -o -iname 'playerTabList.h' \) -print | sort
+          find "$C" -type f -path '*/armhook/link.h' -print -exec sed -n '1,20p' {} \;
 
       - name: Build Release APK
         id: build
