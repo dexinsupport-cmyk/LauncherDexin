@@ -46,10 +46,17 @@ jobs:
       - name: Native source diagnostics
         shell: bash
         run: |
+          set -u
           C="$PROJECT_DIR/app/src/main/cpp"
-          echo '=== RGBA headers ==='; find "$C" -type f -iname '*rgba*.h' -print | sort || true
-          echo '=== playerTabList headers ==='; find "$C" -type f -iname '*playertablist*.h' -print | sort || true
-          echo '=== relevant includes ==='; grep -RIn --include='*.cpp' --include='*.c' --include='*.h' --include='*.hpp' -E '#include[[:space:]]*[<"](.*RGBA\.h|.*rgba\.h|.*playerTabList\.h|.*playertablist\.h)' "$C" || true
+          echo '=== ALL candidate headers ==='
+          find "$C" -type f \( -iname '*rgba*.h' -o -iname '*playertablist*.h' \) -print | sort || true
+          echo '=== relevant includes ==='
+          grep -RIn --include='*.cpp' --include='*.c' --include='*.h' --include='*.hpp' -E '#include[[:space:]]*[<"](.*RGBA\.h|.*rgba\.h|.*playerTabList\.h|.*playertablist\.h)' "$C" || true
+          echo '=== gui.h locations ==='
+          find "$C" -type f -iname 'gui.h' -print | sort || true
+          while IFS= read -r f; do echo "===== $f ====="; sed -n '1,260p' "$f"; done < <(find "$C" -type f -iname 'gui.h' -print | sort) || true
+          echo '=== PlayerTabList references ==='
+          grep -RIn --include='*.cpp' --include='*.c' --include='*.h' --include='*.hpp' -E 'PlayerTabList|playerTabList|playerTablist|playertablist' "$C" || true
       - name: Build Release APK
         id: gradle_build
         working-directory: ${{ env.PROJECT_DIR }}
