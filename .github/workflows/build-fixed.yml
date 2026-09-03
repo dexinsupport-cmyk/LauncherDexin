@@ -73,16 +73,31 @@ jobs:
           copy_case_insensitive 'playerTabList.h' "$S/samp_widgets/playerTabList.h"
           copy_case_insensitive 'RGBA.h' "$S/game/RGBA.h"
 
+          # Network.h uses ../vendor/RakNet/... while the assembled source
+          # contains the RakNet directory as lowercase 'raknet'. Linux paths
+          # are case-sensitive, so provide a build-only compatibility alias.
+          if [ -d "$S/vendor/raknet" ] && [ ! -e "$S/vendor/RakNet" ]; then
+            ln -s "raknet" "$S/vendor/RakNet"
+          fi
+          if [ ! -f "$S/vendor/RakNet/BitStream.h" ]; then
+            echo "ERROR: required RakNet header is still missing: $S/vendor/RakNet/BitStream.h"
+            find "$S/vendor" -maxdepth 3 -type f -iname 'BitStream.h' -print || true
+            exit 1
+          fi
+          echo "Using RakNet compatibility path: $S/vendor/RakNet/BitStream.h"
+
       - name: Native source diagnostics
         shell: bash
         run: |
           C="$PROJECT_DIR/app/src/main/cpp"
           echo '=== required headers ==='
-          ls -l "$C/samp/samp_widgets/playerTabList.h" "$C/samp/game/RGBA.h"
+          ls -l "$C/samp/samp_widgets/playerTabList.h" "$C/samp/game/RGBA.h" "$C/samp/vendor/RakNet/BitStream.h"
           echo '=== RGBA/player list headers in source ==='
           find "$C" -type f \( -iname '*rgba*.h' -o -iname '*playertablist*.h' \) -print | sort || true
           echo '=== relevant includes ==='
           grep -RIn --include='*.cpp' --include='*.c' --include='*.h' --include='*.hpp' -E '#include[[:space:]]*[<"](.*RGBA\.h|.*rgba\.h|.*playerTabList\.h|.*playertablist\.h)' "$C" || true
+          echo '=== RakNet paths ==='
+          find "$C/samp/vendor" -maxdepth 2 -type f -iname '*bitstream*.h' -o -type l -name 'RakNet' -print || true
       - name: Build Release APK
         id: gradle_build
         working-directory: ${{ env.PROJECT_DIR }}
