@@ -97,11 +97,6 @@ jobs:
             fi
           done < <(find "$C" -type f -path '*/armhook/link.h' -print0)
 
-          # Linux is case-sensitive for all headers. For known headers used by
-          # the project, create an exact-case alias beside the including source.
-          # This keeps the original source untouched while making the CI build
-          # behave like the case-insensitive filesystem it was developed on.
-
           # Fix playerTabList.h referenced by gui.h.
           while IFS= read -r -d '' GUI; do
             GUI_DIR="$(dirname "$GUI")"
@@ -116,40 +111,42 @@ jobs:
             fi
           done < <(find "$C" -type f -path '*/gui/gui.h' -print0)
 
-          # Fix RGBA.h referenced by game/rgba.cpp. Find the real header
-          # regardless of capitalization/location, then place an exact-case
-          # copy next to rgba.cpp so #include "RGBA.h" resolves on Linux.
-          while IFS= read -r -d '' CPP; do
-            if grep -qE '#[[:space:]]*include[[:space:]]*[<"]RGBA\.h[>"]' "$CPP"; then
-              CPP_DIR="$(dirname "$CPP")"
-              if [ ! -f "$CPP_DIR/RGBA.h" ]; then
-                SRC="$(find "$C" -type f -iname 'RGBA.h' -print -quit || true)"
-                if [ -n "$SRC" ]; then
-                  cp -f "$SRC" "$CPP_DIR/RGBA.h"
-                  echo "Created Linux-case header: $CPP_DIR/RGBA.h from $SRC"
-                fi
-              fi
-            fi
-          done < <(find "$C" -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -print0)
-
-          # If the expected player header still does not exist, fail here with
-          # a clear message instead of letting Ninja emit a less useful error.
           FOUND="$(find "$C" -type f -path '*/samp_widgets/playerTabList.h' -print -quit || true)"
           if [ -z "$FOUND" ]; then
             echo 'ERROR: Could not provide samp_widgets/playerTabList.h'
-            echo 'Available similarly named headers:'
             find "$C" -type f -iname '*playertablist*.h' -print || true
             exit 1
           fi
 
-          # Verify RGBA.h resolution before invoking Gradle.
-          RGBA_FOUND="$(find "$C" -type f -name 'RGBA.h' -print -quit || true)"
-          if [ -z "$RGBA_FOUND" ]; then
-            echo 'ERROR: Could not provide RGBA.h'
-            echo 'Available similarly named headers:'
-            find "$C" -type f -iname '*rgba*.h' -print || true
+          # Resolve RGBA includes robustly. The source currently asks for
+          # "RGBA.h", but the actual header may differ by case, directory,
+          # or even use the .hpp extension. Find it case-insensitively and
+          # patch the include to the real filename, then copy it beside the
+          # including rgba.cpp so the quoted include always resolves.
+          RGBA_SOURCE="$(find "$C" -type f \( -iname 'RGBA.h' -o -iname 'RGBA.hpp' -o -iname 'rgba.inc' \) -print -quit || true)"
+          if [ -z "$RGBA_SOURCE" ]; then
+            echo 'ERROR: RGBA header is missing from the extracted source.'
+            echo 'Files containing rgba in their name:'
+            find "$C" -type f -iname '*rgba*' -print | sort || true
             exit 1
           fi
+
+          RGBA_BASENAME="$(basename "$RGBA_SOURCE")"
+          echo "Using RGBA header: $RGBA_SOURCE"
+
+          while IFS= read -r -d '' CPP; do
+            if grep -Eq '#[[:space:]]*include[[:space:]]*[<"]RGBA\.h[>"]' "$CPP"; then
+              CPP_DIR="$(dirname "$CPP")"
+              cp -f "$RGBA_SOURCE" "$CPP_DIR/RGBA.h"
+              # Also normalize the include itself so any unusual include path
+              # is no longer dependent on filesystem case behavior.
+              sed -i -E 's/([#][[:space:]]*include[[:space:]]*[<"])RGBA\.h([>"])/\1RGBA.h\2/g' "$CPP"
+              echo "Resolved RGBA.h for: $CPP"
+            fi
+          done < <(find "$C" -type f \( -name '*.cpp' -o -name '*.c' \) -print0)
+
+          RGBA_FOUND="$(find "$C" -type f -name 'RGBA.h' -print -quit || true)"
+          [ -n "$RGBA_FOUND" ] || { echo 'ERROR: RGBA.h could not be created'; exit 1; }
 
           # Replace deprecated JCenter in the extracted Gradle project.
           find "$PROJECT_DIR" -type f \( -name '*.gradle' -o -name '*.gradle.kts' \) -print0 |
