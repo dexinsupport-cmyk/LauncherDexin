@@ -49,34 +49,40 @@ jobs:
           set -euo pipefail
           C="$PROJECT_DIR/app/src/main/cpp"
           S="$C/samp"
-          mkdir -p "$S/samp_widgets"
-          TARGET="$S/samp_widgets/playerTabList.h"
-          FOUND="$(find "$C" -type f -iname 'playerTabList.h' -print -quit || true)"
-          [ -n "$FOUND" ] || FOUND="$(find "$C" -type f -iname 'playertablist.h' -print -quit || true)"
-          if [ -n "$FOUND" ] && [ "$FOUND" != "$TARGET" ]; then cp -f "$FOUND" "$TARGET"; fi
-          if [ ! -f "$TARGET" ]; then
-            echo 'ERROR: playerTabList.h is genuinely missing from the assembled source.'
-            find "$C" -type f -iname '*playertablist*' -print || true
-            exit 1
-          fi
-          echo "Using $TARGET"
-          while IFS= read -r f; do
-            base="$(basename "$f")"
-            lower="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')"
-            if [ "$base" != "$lower" ]; then
-              case "$lower" in
-                rgba.h|playertablist.h) : ;;
-                *) continue ;;
-              esac
+
+          # The original C/C++ source is not edited. These are build-time copies
+          # only, so the APK's launcher/game source remains unchanged.
+          mkdir -p "$S/samp_widgets" "$S/game"
+
+          copy_case_insensitive() {
+            local pattern="$1"
+            local target="$2"
+            local found
+            found="$(find "$C" -type f -iname "$pattern" -print -quit || true)"
+            if [ -z "$found" ]; then
+              echo "ERROR: required header '$pattern' was not found in assembled source"
+              find "$C" -type f -iname "*$(basename "$pattern" .h)*" -print || true
+              exit 1
             fi
-          done < <(find "$C" -type f -name '*.h' -print)
+            if [ "$found" != "$target" ]; then
+              cp -f "$found" "$target"
+            fi
+            echo "Using $target <- $found"
+          }
+
+          copy_case_insensitive 'playerTabList.h' "$S/samp_widgets/playerTabList.h"
+          copy_case_insensitive 'RGBA.h' "$S/game/RGBA.h"
+
       - name: Native source diagnostics
         shell: bash
         run: |
           C="$PROJECT_DIR/app/src/main/cpp"
-          echo '=== playerTabList target ==='; ls -l "$C/samp/samp_widgets/playerTabList.h"
-          echo '=== RGBA headers ==='; find "$C" -type f -iname '*rgba*.h' -print | sort || true
-          echo '=== relevant includes ==='; grep -RIn --include='*.cpp' --include='*.c' --include='*.h' --include='*.hpp' -E '#include[[:space:]]*[<"](.*RGBA\.h|.*rgba\.h|.*playerTabList\.h|.*playertablist\.h)' "$C" || true
+          echo '=== required headers ==='
+          ls -l "$C/samp/samp_widgets/playerTabList.h" "$C/samp/game/RGBA.h"
+          echo '=== RGBA/player list headers in source ==='
+          find "$C" -type f \( -iname '*rgba*.h' -o -iname '*playertablist*.h' \) -print | sort || true
+          echo '=== relevant includes ==='
+          grep -RIn --include='*.cpp' --include='*.c' --include='*.h' --include='*.hpp' -E '#include[[:space:]]*[<"](.*RGBA\.h|.*rgba\.h|.*playerTabList\.h|.*playertablist\.h)' "$C" || true
       - name: Build Release APK
         id: gradle_build
         working-directory: ${{ env.PROJECT_DIR }}
