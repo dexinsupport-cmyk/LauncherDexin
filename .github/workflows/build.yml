@@ -22,7 +22,7 @@ jobs:
           set -euo pipefail
           mapfile -t PARTS < <(find . -maxdepth 2 -type f -name '*.zip' -print0 | while IFS= read -r -d '' f; do
             b="$(basename "$f")"
-            if [[ "$b" =~ Part([0-9]+)(-[^/]*)?\.zip$ ]]; then
+            if [[ "$b" =~ [Pp]art([0-9]+)(-[^/]*)?\.zip$ ]]; then
               printf '%s\t%s\n' "${BASH_REMATCH[1]}" "$f"
             fi
           done | sort -n -k1,1 | cut -f2-)
@@ -30,7 +30,7 @@ jobs:
           expected=1
           for p in "${PARTS[@]}"; do
             b="$(basename "$p")"
-            [[ "$b" =~ Part([0-9]+) ]] || { echo "ERROR: invalid part $b"; exit 1; }
+            [[ "$b" =~ [Pp]art([0-9]+) ]] || { echo "ERROR: invalid part $b"; exit 1; }
             [ "${BASH_REMATCH[1]}" -eq "$expected" ] || { echo "ERROR: expected Part${expected}, found $b"; exit 1; }
             expected=$((expected+1))
           done
@@ -83,20 +83,21 @@ jobs:
           copy_case_insensitive 'playerTabList.h' "$S/gui/samp_widgets/playerTabList.h"
           copy_case_insensitive 'RGBA.h' "$S/game/RGBA.h"
 
-          # Network.h expects vendor/RakNet on Linux while the real source tree
-          # is vendor/raknet. Expose only the header required by the include.
-          # Never symlink the whole directory because that duplicates .cpp files.
+          # Network.h includes ../vendor/RakNet/*.h while the real source tree
+          # is vendor/raknet. Expose headers only; never duplicate .cpp files.
           mkdir -p "$S/vendor/RakNet"
-          BITSTREAM="$(find "$S/vendor/raknet" -type f -iname 'BitStream.h' -print -quit || true)"
-          [ -n "$BITSTREAM" ] || { echo 'ERROR: BitStream.h not found under vendor/raknet'; exit 1; }
-          cp -f "$BITSTREAM" "$S/vendor/RakNet/BitStream.h"
+          for h in RakClient.h RakPeer.h RakNetTypes.h BitStream.h RakNetDefines.h; do
+            found="$(find "$S/vendor/raknet" -type f -iname "$h" -print -quit || true)"
+            if [ -n "$found" ]; then cp -f "$found" "$S/vendor/RakNet/$h"; fi
+          done
+          test -f "$S/vendor/RakNet/RakClient.h" || { echo 'ERROR: RakClient.h not found'; exit 1; }
 
       - name: Native source diagnostics
         shell: bash
         run: |
           set -euo pipefail
           C="$PROJECT_DIR/app/src/main/cpp"
-          ls -l "$C/samp/gui/samp_widgets/playerTabList.h" "$C/samp/game/RGBA.h" "$C/samp/vendor/RakNet/BitStream.h"
+          ls -l "$C/samp/gui/samp_widgets/playerTabList.h" "$C/samp/game/RGBA.h" "$C/samp/vendor/RakNet/RakClient.h"
           test ! -L "$C/samp/vendor/RakNet" || { echo 'ERROR: RakNet must not be a directory symlink'; exit 1; }
 
       - name: Build Release APK
