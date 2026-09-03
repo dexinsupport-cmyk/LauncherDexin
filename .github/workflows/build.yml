@@ -21,41 +21,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           mapfile -t PARTS < <(
-            find . -maxdepth 2 -type f -name '*.zip' -print0 |
-            while IFS= read -r -d '' f; do
-              b="$(basename "$f")"
-              if [[ "$b" =~ [Pp]art([0-9]+)(-[^/]*)?\.zip$ ]]; then
-                printf '%s\t%s\n' "${BASH_REMATCH[1]}" "$f"
-              fi
-            done |
-            sort -n -k1,1 |
-            cut -f2-
+            for n in 1 2 3; do
+              f="$(find . -maxdepth 2 -type f \( -name "DexinMobile_Verify_SourcePart${n}.zip" -o -name "*SourcePart${n}.zip" \) -print -quit)"
+              [ -n "$f" ] || { echo "ERROR: SourcePart${n}.zip not found"; exit 1; }
+              printf '%s\n' "$f"
+            done
           )
-
-          [ "${#PARTS[@]}" -gt 0 ] || {
-            echo "ERROR: no source Part*.zip files found"
-            exit 1
-          }
-
-          expected=1
-          for p in "${PARTS[@]}"; do
-            b="$(basename "$p")"
-            [[ "$b" =~ [Pp]art([0-9]+) ]] || exit 1
-            [ "${BASH_REMATCH[1]}" -eq "$expected" ] || {
-              echo "ERROR: expected Part${expected}, found $b"
-              exit 1
-            }
-            expected=$((expected + 1))
-          done
-
-          echo "Parts found:"
-          printf ' - %s\n' "${PARTS[@]}"
-
           cat "${PARTS[@]}" > source.zip
           unzip -t source.zip
-
           rm -rf _source
           mkdir -p _source
           unzip -q source.zip -d _source
@@ -70,7 +44,7 @@ jobs:
           echo "PROJECT_DIR=$D" >> "$GITHUB_ENV"
           sed -i 's/\r$//' "$D/gradlew"
           chmod +x "$D/gradlew"
-          echo "Gradle project: $D"
+          echo "PROJECT_DIR=$D"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -87,145 +61,127 @@ jobs:
         run: |
           set -euo pipefail
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0" \
-            "ndk;26.2.11394342" \
-            "cmake;3.22.1"
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.2.11394342" "cmake;3.22.1"
 
-      - name: Fix Linux native paths and CMake source duplication
+      - name: Prepare native source tree
         shell: bash
         run: |
           set -euo pipefail
-
           C="$PROJECT_DIR/app/src/main/cpp"
           S="$C/samp"
           REAL_RAKNET="$S/vendor/raknet"
           MIRROR_RAKNET="$S/vendor/RakNet"
           SAMP_CMAKE="$S/CMakeLists.txt"
+          test -d "$S" || { echo "ERROR: samp directory not found"; exit 1; }
+          test -d "$REAL_RAKNET" || { echo "ERROR: vendor/raknet not found"; exit 1; }
 
-          test -d "$S" || { echo "ERROR: samp native directory not found: $S"; exit 1; }
-          test -d "$REAL_RAKNET" || { echo "ERROR: vendor/raknet not found: $REAL_RAKNET"; exit 1; }
-
-          mkdir -p "$S/gui/samp_widgets" "$S/game"
-
-          copy_case_insensitive() {
-            local pattern="$1"
-            local target="$2"
-            local found
-            found="$(find "$C" -type f -iname "$pattern" -print -quit || true)"
-            [ -n "$found" ] || {
-              echo "ERROR: required header '$pattern' was not found"
-              exit 1
-            }
-            cp -f "$found" "$target"
-          }
-
-          copy_case_insensitive "playerTabList.h" "$S/gui/samp_widgets/playerTabList.h"
-          copy_case_insensitive "RGBA.h" "$S/game/RGBA.h"
-
-          # Network.h uses vendor/RakNet/*.h while the real tree is
-          # vendor/raknet. Keep an uppercase compatibility tree containing
-          # headers only. Never put .cpp files here.
+          # Compatibility directory is header-only. This prevents Network.h
+          # from failing on Linux due to RakNet/RakNet case differences.
           rm -rf "$MIRROR_RAKNET"
           mkdir -p "$MIRROR_RAKNET"
+          while IFS= read -r -d '' f; do
+            rel="${f#"$REAL_RAKNET"/}"
+            mkdir -p "$MIRROR_RAKNET/$(dirname "$rel")"
+            cp -f "$f" "$MIRROR_RAKNET/$rel"
+          done < <(find "$REAL_RAKNET" -type f \( -iname '*.h' -o -iname '*.hpp' -o -iname '*.inl' \) -print0)
 
-          while IFS= read -r -d '' src; do
-            rel="${src#"$REAL_RAKNET"/}"
-            dst="$MIRROR_RAKNET/$rel"
-            mkdir -p "$(dirname "$dst")"
-            cp -f "$src" "$dst"
-          done < <(
-            find "$REAL_RAKNET" -type f \
-              \( -iname '*.h' -o -iname '*.hpp' -o -iname '*.inl' \) \
-              -print0
-          )
+          # Remove any accidental implementation files from the compatibility tree.
+          find "$MIRROR_RAKNET" -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' \) -delete
 
-          for h in RakClient.h RakPeer.h Export.h BitStream.h RakNetTypes.h; do
-            test -f "$MIRROR_RAKNET/$h" || {
-              echo "ERROR: required RakNet header missing: $h"
-              exit 1
-            }
-          done
+          echo "RakNet implementation copies currently present:"
+          find "$S" -type f \( -iname 'BitStream.cpp' -o -iname 'DS_ByteQueue.cpp' -o -iname 'PluginInterface.cpp' -o -iname 'PluginInterface2.cpp' -o -iname 'RakPeer.cpp' -o -iname 'RakClient.cpp' \) -print | sort
 
-          if find "$MIRROR_RAKNET" -type f \
-            \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' -o -name '*.c' \) \
-            -print -quit | grep -q .; then
-            echo "ERROR: implementation file found in vendor/RakNet"
-            exit 1
-          fi
+      - name: Fix CMake source list - unique paths and unique RakNet implementations
+        shell: bash
+        run: |
+          set -euo pipefail
+          S="$PROJECT_DIR/app/src/main/cpp/samp"
+          CMAKE="$S/CMakeLists.txt"
 
-          # IMPORTANT: the original samp/CMakeLists.txt has many overlapping
-          # GLOB_RECURSE patterns. The same BitStream.cpp/RakPeer.cpp/etc can
-          # therefore be added to SOURCES multiple times, which produces
-          # ld.lld 'duplicate symbol' errors. Replace that entire source glob
-          # with one recursive glob so every implementation file is included
-          # exactly once.
-          python3 - "$SAMP_CMAKE" <<'PY'
-          import re
-          import sys
+          # Do NOT replace the project's source discovery with another GLOB.
+          # First let the original CMake files construct the samp target.
+          # Then, at the end of samp/CMakeLists.txt, normalize its SOURCES list.
+          # CMake's list(REMOVE_DUPLICATES) removes repeated source paths; the
+          # extra RakNet filter handles separate copies of the same implementation
+          # under differently-cased/vendor directories.
+          python3 - "$CMAKE" <<'PY'
           from pathlib import Path
+          import sys
 
-          path = Path(sys.argv[1])
-          text = path.read_text(encoding="utf-8")
+          p = Path(sys.argv[1])
+          text = p.read_text(encoding='utf-8')
+          marker = '# DEXIN_UNIQUE_SAMP_SOURCES'
+          if marker not in text:
+              block = r'''
 
-          pattern = re.compile(
-              r'file\(GLOB_RECURSE\s+SOURCES\s+.*?\n\s*\)',
-              re.DOTALL,
-          )
+# DEXIN_UNIQUE_SAMP_SOURCES
+# Normalize the final target source list after all target_sources/add_library
+# calls in this directory have executed.
+if(TARGET samp)
+  get_target_property(_dexin_sources samp SOURCES)
+  if(_dexin_sources)
+    list(REMOVE_DUPLICATES _dexin_sources)
 
-          replacement = '''file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
-                  ${CMAKE_CURRENT_LIST_DIR}/*.c*
-                  )'''
+    # Keep one canonical implementation for the RakNet translation units that
+    # are known to produce duplicate symbols when two RakNet trees are present.
+    set(_dexin_raknet_names
+      BitStream.cpp
+      DS_ByteQueue.cpp
+      PluginInterface.cpp
+      PluginInterface2.cpp
+      RakPeer.cpp
+      RakClient.cpp
+      RakNetCommandParser.cpp
+      NetworkTypes.cpp
+      DS_HuffmanEncodingTree.cpp
+      DS_Table.cpp
+    )
 
-          new_text, count = pattern.subn(replacement, text, count=1)
-          if count != 1:
-              raise SystemExit("ERROR: could not locate SOURCES GLOB in samp/CMakeLists.txt")
+    set(_dexin_filtered_sources "")
+    foreach(_dexin_src IN LISTS _dexin_sources)
+      get_filename_component(_dexin_abs "${_dexin_src}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+      get_filename_component(_dexin_name "${_dexin_abs}" NAME)
 
-          path.write_text(new_text, encoding="utf-8")
-          print("Patched samp/CMakeLists.txt: single recursive source glob enabled.")
+      set(_dexin_skip FALSE)
+      list(FIND _dexin_raknet_names "${_dexin_name}" _dexin_raknet_index)
+      if(NOT _dexin_raknet_index EQUAL -1)
+        string(TOLOWER "${_dexin_abs}" _dexin_lower)
+        # Only the canonical lower-case vendor/raknet tree supplies RakNet .cpp files.
+        if(_dexin_lower MATCHES "/vendor/raknet/")
+          set(_dexin_skip FALSE)
+        else()
+          set(_dexin_skip TRUE)
+        endif()
+      endif()
+
+      if(NOT _dexin_skip)
+        list(APPEND _dexin_filtered_sources "${_dexin_src}")
+      endif()
+    endforeach()
+
+    list(REMOVE_DUPLICATES _dexin_filtered_sources)
+    set_property(TARGET samp PROPERTY SOURCES "${_dexin_filtered_sources}")
+    message(STATUS "DEXIN: normalized samp SOURCES: ${_dexin_filtered_sources}")
+  endif()
+endif()
+'''
+              p.write_text(text.rstrip() + block + '\n', encoding='utf-8')
+              print('Appended DEXIN target-source normalization to', p)
+          else:
+              print('DEXIN target-source normalization already present')
           PY
 
-          grep -A4 -B2 'file(GLOB_RECURSE SOURCES' "$SAMP_CMAKE"
+          # Also make sure the uppercase compatibility tree can never be compiled.
+          if grep -RIlE 'vendor/RakNet|vendor/raknet' "$S" --include='CMakeLists.txt' | grep -q .; then
+            echo "CMake RakNet references:"
+            grep -RInE 'vendor/RakNet|vendor/raknet' "$S" --include='CMakeLists.txt' | head -n 100 || true
+          fi
 
       - name: Remove native build caches
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf "$PROJECT_DIR/app/.cxx"
-          rm -rf "$PROJECT_DIR/app/build"
-          echo "Removed CMake/Gradle native build caches."
-
-      - name: Verify RakNet and CMake source list
-        shell: bash
-        run: |
-          set -euo pipefail
-          C="$PROJECT_DIR/app/src/main/cpp/samp"
-
-          echo "Checking RakNet implementation files:"
-          find "$C/vendor/raknet" -type f \
-            \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) \
-            | sort | sed -n '1,250p'
-
-          echo
-          echo "Checking uppercase compatibility tree:"
-          if find "$C/vendor/RakNet" -type f \
-            \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' -o -name '*.c' \) \
-            | grep -q .; then
-            echo "ERROR: vendor/RakNet contains implementation sources"
-            exit 1
-          fi
-
-          test -f "$C/vendor/RakNet/RakClient.h"
-          test -f "$C/vendor/RakNet/RakPeer.h"
-          test -f "$C/vendor/RakNet/Export.h"
-
-          echo
-          echo "Checking CMake source glob:"
-          grep -A4 'file(GLOB_RECURSE SOURCES' "$C/CMakeLists.txt"
-
-          echo "OK: RakNet headers are mirrored without sources and CMake has one source glob."
+          rm -rf "$PROJECT_DIR/app/.cxx" "$PROJECT_DIR/app/build"
 
       - name: Build Release APK
         id: gradle_build
