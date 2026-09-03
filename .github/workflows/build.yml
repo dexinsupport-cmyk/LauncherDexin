@@ -94,7 +94,7 @@ jobs:
             "ndk;26.2.11394342" \
             "cmake;3.22.1"
 
-      - name: Fix Linux native include paths
+      - name: Fix Linux native paths and CMake source duplication
         shell: bash
         run: |
           set -euo pipefail
@@ -103,6 +103,7 @@ jobs:
           S="$C/samp"
           REAL_RAKNET="$S/vendor/raknet"
           MIRROR_RAKNET="$S/vendor/RakNet"
+          SAMP_CMAKE="$S/CMakeLists.txt"
 
           test -d "$S" || { echo "ERROR: samp native directory not found: $S"; exit 1; }
           test -d "$REAL_RAKNET" || { echo "ERROR: vendor/raknet not found: $REAL_RAKNET"; exit 1; }
@@ -124,15 +125,12 @@ jobs:
           copy_case_insensitive "playerTabList.h" "$S/gui/samp_widgets/playerTabList.h"
           copy_case_insensitive "RGBA.h" "$S/game/RGBA.h"
 
-          # Network.h includes ../vendor/RakNet/*.h on Linux, while the real
-          # source tree is vendor/raknet. The uppercase compatibility tree
-          # MUST contain headers only. If it contains .cpp files, CMake can
-          # compile RakNet twice and the linker reports duplicate symbols.
+          # Network.h uses vendor/RakNet/*.h while the real tree is
+          # vendor/raknet. Keep an uppercase compatibility tree containing
+          # headers only. Never put .cpp files here.
           rm -rf "$MIRROR_RAKNET"
           mkdir -p "$MIRROR_RAKNET"
 
-          # Copy every header/inl from the real tree while preserving its
-          # relative directory layout. Never copy C/C++ implementation files.
           while IFS= read -r -d '' src; do
             rel="${src#"$REAL_RAKNET"/}"
             dst="$MIRROR_RAKNET/$rel"
@@ -144,7 +142,6 @@ jobs:
               -print0
           )
 
-          # Required headers. RakPeer.h itself includes Export.h.
           for h in RakClient.h RakPeer.h Export.h BitStream.h RakNetTypes.h; do
             test -f "$MIRROR_RAKNET/$h" || {
               echo "ERROR: required RakNet header missing: $h"
@@ -152,18 +149,45 @@ jobs:
             }
           done
 
-          # Safety check: compatibility tree must never contain implementation files.
           if find "$MIRROR_RAKNET" -type f \
             \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' -o -name '*.c' \) \
             -print -quit | grep -q .; then
             echo "ERROR: implementation file found in vendor/RakNet"
-            find "$MIRROR_RAKNET" -type f \
-              \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' -o -name '*.c' \)
             exit 1
           fi
 
-          echo "RakNet compatibility headers prepared."
-          ls -la "$MIRROR_RAKNET" | head -n 100
+          # IMPORTANT: the original samp/CMakeLists.txt has many overlapping
+          # GLOB_RECURSE patterns. The same BitStream.cpp/RakPeer.cpp/etc can
+          # therefore be added to SOURCES multiple times, which produces
+          # ld.lld 'duplicate symbol' errors. Replace that entire source glob
+          # with one recursive glob so every implementation file is included
+          # exactly once.
+          python3 - "$SAMP_CMAKE" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8")
+
+          pattern = re.compile(
+              r'file\(GLOB_RECURSE\s+SOURCES\s+.*?\n\s*\)',
+              re.DOTALL,
+          )
+
+          replacement = '''file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
+                  ${CMAKE_CURRENT_LIST_DIR}/*.c*
+                  )'''
+
+          new_text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit("ERROR: could not locate SOURCES GLOB in samp/CMakeLists.txt")
+
+          path.write_text(new_text, encoding="utf-8")
+          print("Patched samp/CMakeLists.txt: single recursive source glob enabled.")
+          PY
+
+          grep -A4 -B2 'file(GLOB_RECURSE SOURCES' "$SAMP_CMAKE"
 
       - name: Remove native build caches
         shell: bash
@@ -173,30 +197,35 @@ jobs:
           rm -rf "$PROJECT_DIR/app/build"
           echo "Removed CMake/Gradle native build caches."
 
-      - name: Verify RakNet source duplication
+      - name: Verify RakNet and CMake source list
         shell: bash
         run: |
           set -euo pipefail
           C="$PROJECT_DIR/app/src/main/cpp/samp"
 
-          echo "RakNet implementation files:"
-          find "$C/vendor" -type f \
+          echo "Checking RakNet implementation files:"
+          find "$C/vendor/raknet" -type f \
             \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) \
             | sort | sed -n '1,250p'
 
           echo
-          echo "Checking uppercase compatibility tree..."
+          echo "Checking uppercase compatibility tree:"
           if find "$C/vendor/RakNet" -type f \
-            \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) \
+            \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' -o -name '*.c' \) \
             | grep -q .; then
-            echo "ERROR: duplicate RakNet implementation sources detected"
+            echo "ERROR: vendor/RakNet contains implementation sources"
             exit 1
           fi
 
           test -f "$C/vendor/RakNet/RakClient.h"
           test -f "$C/vendor/RakNet/RakPeer.h"
           test -f "$C/vendor/RakNet/Export.h"
-          echo "OK: RakNet compatibility directory contains headers only."
+
+          echo
+          echo "Checking CMake source glob:"
+          grep -A4 'file(GLOB_RECURSE SOURCES' "$C/CMakeLists.txt"
+
+          echo "OK: RakNet headers are mirrored without sources and CMake has one source glob."
 
       - name: Build Release APK
         id: gradle_build
