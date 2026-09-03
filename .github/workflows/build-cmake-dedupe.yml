@@ -1,4 +1,4 @@
-name: Build Dexin Mobile APK - CMake Deduped
+name: Build Dexin Mobile APK - CMake Final
 
 on:
   workflow_dispatch:
@@ -17,14 +17,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t PARTS < <(
-            for n in 1 2 3; do
-              f="$(find . -maxdepth 2 -type f \( -name "DexinMobile_Verify_SourcePart${n}.zip" -o -name "*SourcePart${n}.zip" \) -print -quit)"
-              [ -n "$f" ] || { echo "ERROR: SourcePart${n}.zip not found"; exit 1; }
-              printf '%s\n' "$f"
-            done
-          )
-          cat "${PARTS[@]}" > source.zip
+          parts=()
+          for n in 1 2 3; do
+            f="$(find . -maxdepth 2 -type f -name "DexinMobile_Verify_SourcePart${n}.zip" -print -quit)"
+            [ -n "$f" ] || { echo "ERROR: SourcePart${n}.zip not found"; exit 1; }
+            parts+=("$f")
+          done
+          cat "${parts[@]}" > source.zip
           unzip -t source.zip
           rm -rf _source
           mkdir _source
@@ -35,9 +34,8 @@ jobs:
         run: |
           set -euo pipefail
           G="$(find _source -type f -name gradlew -print -quit)"
-          [ -n "$G" ] || exit 1
-          D="$(dirname "$G")"
-          D="$(cd "$D" && pwd)"
+          [ -n "$G" ] || { echo "ERROR: gradlew not found"; exit 1; }
+          D="$(cd "$(dirname "$G")" && pwd)"
           echo "PROJECT_DIR=$D" >> "$GITHUB_ENV"
           sed -i 's/\r$//' "$D/gradlew"
           chmod +x "$D/gradlew"
@@ -53,64 +51,54 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install native tools
+        shell: bash
         run: |
+          set -euo pipefail
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.2.11394342" "cmake;3.22.1"
 
-      - name: Deduplicate native source tree and CMake target
+      - name: Fix native tree before CMake
         shell: bash
         run: |
           set -euo pipefail
           C="$PROJECT_DIR/app/src/main/cpp"
           S="$C/samp"
           R="$S/vendor/raknet"
-          M="$S/vendor/RakNet"
-          test -d "$S"
-          test -d "$R"
+          U="$S/vendor/RakNet"
+          test -d "$S" || { echo "ERROR: samp directory missing"; exit 1; }
+          test -d "$R" || { echo "ERROR: canonical vendor/raknet missing"; exit 1; }
 
-          # Compatibility directory is headers only.
-          rm -rf "$M"
-          mkdir -p "$M"
-          while IFS= read -r -d '' f; do
-            rel="${f#"$R"/}"
-            mkdir -p "$M/$(dirname "$rel")"
-            cp -f "$f" "$M/$rel"
-          done < <(find "$R" -type f \( -iname '*.h' -o -iname '*.hpp' -o -iname '*.inl' \) -print0)
-          find "$M" -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' \) -delete
+          # The failing build proved that the archive contains two complete
+          # RakNet trees: vendor/RakNet and vendor/raknet. Both were compiled,
+          # producing identical symbols. Do not mirror implementation files.
+          # Remove the duplicate tree and rewrite only path references to the
+          # canonical lower-case tree. This happens BEFORE CMake configures.
+          rm -rf "$U"
+          find "$S" -type f \( -name 'CMakeLists.txt' -o -name '*.cmake' -o -name '*.h' -o -name '*.hpp' -o -name '*.inl' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' \) -print0 \
+            | xargs -0 -r sed -i 's#vendor/RakNet/#vendor/raknet/#g; s#vendor/RakNet#vendor/raknet#g'
 
-          # A duplicate symbol can also come from a second copy at a different
-          # path. Keep the canonical RakNet implementation only.
-          for n in BitStream.cpp DS_ByteQueue.cpp PluginInterface.cpp PluginInterface2.cpp RakPeer.cpp RakClient.cpp RakNetCommandParser.cpp NetworkTypes.cpp DS_HuffmanEncodingTree.cpp DS_Table.cpp AsynchronousFileIO.cpp CheckSum.cpp GetTime.cpp HuffmanEncodingTree.cpp StringCompressor.cpp; do
-            while IFS= read -r -d '' f; do
-              case "$f" in "$R"/*) ;; *) echo "Removing duplicate: $f"; rm -f "$f" ;; esac
-            done < <(find "$S" -type f -name "$n" -print0)
-          done
+          # Restore known case-sensitive compatibility headers.
+          mkdir -p "$S/gui/samp_widgets" "$S/game"
+          p="$(find "$C" -type f -iname 'playerTabList.h' -print -quit || true)"
+          [ -n "$p" ] && cp -f "$p" "$S/gui/samp_widgets/playerTabList.h" || true
+          r="$(find "$C" -type f -iname 'RGBA.h' -print -quit || true)"
+          [ -n "$r" ] && cp -f "$r" "$S/game/RGBA.h" || true
 
-          # Inject a final target-level path dedupe without replacing any GLOB.
-          for F in "$S/CMakeLists.txt" "$C/CMakeLists.txt"; do
-            [ -f "$F" ] || continue
-            if ! grep -q DEXIN_FINAL_SOURCE_DEDUPE "$F"; then
-              cat >> "$F" <<'CMAKE'
-
-# DEXIN_FINAL_SOURCE_DEDUPE
-if(TARGET samp)
-  get_target_property(_dexin_sources samp SOURCES)
-  if(_dexin_sources)
-    list(REMOVE_DUPLICATES _dexin_sources)
-    set_property(TARGET samp PROPERTY SOURCES "${_dexin_sources}")
-    list(LENGTH _dexin_sources _dexin_count)
-    message(STATUS "DEXIN: unique samp SOURCES = ${_dexin_count}")
-  endif()
-endif()
-CMAKE
-            fi
-          done
-
-          echo '--- RakNet duplicate check ---'
-          find "$S" -type f \( -name 'BitStream.cpp' -o -name 'DS_ByteQueue.cpp' -o -name 'PluginInterface.cpp' -o -name 'PluginInterface2.cpp' -o -name 'RakPeer.cpp' -o -name 'RakClient.cpp' \) -print | sort
+          # Hard verification: there must be exactly one implementation copy
+          # of the known RakNet translation units.
+          echo '--- RakNet implementation files ---'
+          find "$S" -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) \
+            | grep -Ei '/vendor/.*/(BitStream|DS_ByteQueue|PluginInterface|PluginInterface2|RakPeer|RakClient|CheckSum|CommandParserInterface|NetworkTypes|RakNetCommandParser)\.(cpp|cc|cxx)$' \
+            | sort
+          if find "$S/vendor" -mindepth 2 -maxdepth 2 -type d -iname 'RakNet' -print -quit | grep -q .; then
+            echo 'ERROR: duplicate RakNet directory still exists'; exit 1
+          fi
 
       - name: Clean native build
-        run: rm -rf "$PROJECT_DIR/app/.cxx" "$PROJECT_DIR/app/build"
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$PROJECT_DIR/app/.cxx" "$PROJECT_DIR/app/build"
 
       - name: Build Release APK
         id: build
@@ -121,7 +109,10 @@ CMAKE
           set -o pipefail
           ./gradlew --no-daemon --stacktrace clean 2>&1 | tee /tmp/gradle.log
           s=${PIPESTATUS[0]}
-          if [ "$s" -eq 0 ]; then ./gradlew --no-daemon --stacktrace :app:assembleRelease 2>&1 | tee -a /tmp/gradle.log; s=${PIPESTATUS[0]}; fi
+          if [ "$s" -eq 0 ]; then
+            ./gradlew --no-daemon --stacktrace :app:assembleRelease 2>&1 | tee -a /tmp/gradle.log
+            s=${PIPESTATUS[0]}
+          fi
           echo "GRADLE_EXIT=$s" >> /tmp/gradle.log
           exit "$s"
 
@@ -129,9 +120,10 @@ CMAKE
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: DexinMobile-cmake-diagnostics
+          name: DexinMobile-cmake-final-diagnostics
           path: /tmp/gradle.log
           if-no-files-found: warn
+          retention-days: 14
 
       - name: Fail if build failed
         if: steps.build.outcome != 'success'
