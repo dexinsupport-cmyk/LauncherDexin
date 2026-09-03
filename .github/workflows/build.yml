@@ -73,26 +73,26 @@ jobs:
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager 'platform-tools' 'platforms;android-34' 'build-tools;34.0.0' 'ndk;26.2.11394342' 'cmake;3.22.1'
 
-      - name: Fix Linux case-sensitive native headers
+      - name: Fix Linux case sensitivity and CLink redefinition
         shell: bash
         run: |
           set -euo pipefail
           C="$PROJECT_DIR/app/src/main/cpp"
           [ -d "$C" ] || { echo "ERROR: native source directory missing: $C"; exit 1; }
 
-          # Resolve every include that differs only by filename case. This is needed
-          # because the original project may have been developed on case-insensitive FS.
           python3 - "$C" <<'PY'
-          import os, re, sys, shutil
+          import os, re, shutil, sys
           root=sys.argv[1]
           files={}
           for dp,_,fn in os.walk(root):
               for f in fn:
                   files.setdefault(f.lower(), []).append(os.path.join(dp,f))
+
           inc=re.compile(r'#include\s*[<"]([^>"]+)[>"]')
+          source_ext=('.c','.cc','.cpp','.cxx','.h','.hpp')
           for dp,_,fn in os.walk(root):
               for f in fn:
-                  if not f.endswith(('.c','.cc','.cpp','.cxx','.h','.hpp')): continue
+                  if not f.endswith(source_ext): continue
                   p=os.path.join(dp,f)
                   try: text=open(p,encoding='utf-8',errors='ignore').read()
                   except OSError: continue
@@ -104,14 +104,35 @@ jobs:
                       exact=[x for x in candidates if os.path.basename(x)==base]
                       if exact: continue
                       src=candidates[0]
-                      rel=os.path.dirname(name)
-                      dst=os.path.join(dp,rel,base)
-                      if os.path.abspath(src)==os.path.abspath(dst): continue
+                      dst=os.path.join(dp,os.path.dirname(name),base)
                       os.makedirs(os.path.dirname(dst),exist_ok=True)
                       if not os.path.exists(dst): shutil.copy2(src,dst)
                       print(f'case-alias: {src} -> {dst}')
-          PY
 
+          # armhook/link.h defines CLink. The source is included from more than one
+          # translation-unit/header path and has no effective include guard. On Linux
+          # this produces a hard C++ redefinition error. Add a real guard only to this
+          # exact header; do not change the CLink implementation itself.
+          link_candidates=[]
+          for dp,_,fn in os.walk(root):
+              for f in fn:
+                  if f.lower() == 'link.h' and os.path.basename(dp).lower() == 'armhook':
+                      link_candidates.append(os.path.join(dp,f))
+          if not link_candidates:
+              print('WARNING: armhook/link.h not found')
+          for p in link_candidates:
+              with open(p,'r',encoding='utf-8',errors='ignore') as fh:
+                  text=fh.read()
+              if '#pragma once' not in text.split('\n',3)[:3]:
+                  with open(p,'w',encoding='utf-8',newline='') as fh:
+                      fh.write('#pragma once\n' + text)
+                  print(f'added include guard: {p}')
+              else:
+                  print(f'include guard already present: {p}')
+
+          echo=''
+          echo '=== armhook/link.h ==='
+          find "$C" -type f -path '*/armhook/link.h' -print -exec sed -n '1,35p' {} \;
           echo '=== required headers ==='
           find "$C" -type f \( -iname 'RGBA.h' -o -iname 'playerTabList.h' \) -print | sort
 
