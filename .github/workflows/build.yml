@@ -116,23 +116,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Do not depend on the missing local Play Market keystore.
-          # Release is signed with the Android debug signing config only for CI output.
-          cat > /tmp/force-release-signing.gradle <<'GRADLE'
+          KEYSTORE="$PROJECT_DIR/ci-release.jks"
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE" \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname 'CN=Android Debug,O=Android,C=US' \
+            >/dev/null 2>&1
+          cat > /tmp/force-release-signing.gradle <<GRADLE
 allprojects {
     afterEvaluate { project ->
         def android = project.extensions.findByName('android')
         if (android != null) {
             def release = android.signingConfigs.findByName('release')
-            def debug = android.signingConfigs.findByName('debug')
-            if (release != null && debug != null) {
-                release.initWith(debug)
+            if (release != null) {
+                release.storeFile = file('${KEYSTORE}')
+                release.storePassword = 'android'
+                release.keyAlias = 'androiddebugkey'
+                release.keyPassword = 'android'
             }
         }
     }
 }
 GRADLE
           echo 'DEXIN_SIGNING_INIT=/tmp/force-release-signing.gradle' >> "$GITHUB_ENV"
+          test -f "$KEYSTORE"
 
       - name: Build Release APK
         id: build
