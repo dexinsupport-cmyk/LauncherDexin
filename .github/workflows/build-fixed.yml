@@ -26,23 +26,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t PARTS < <(
-            find . -maxdepth 2 -type f -name '*.zip' -print0 |
-            while IFS= read -r -d '' f; do
-              b="$(basename "$f")"
-              if [[ "$b" =~ Part([0-9]+)(-[^/]*)?\.zip$ ]]; then
-                printf '%d\t%s\n' "${BASH_REMATCH[1]}" "$f"
-              fi
-            done | sort -n -k1,1 | cut -f2-
-          )
-          [ "${#PARTS[@]}" -eq 3 ] || { echo "ERROR: expected exactly 3 source parts, found ${#PARTS[@]}"; printf 'Found:\n'; printf '  %s\n' "${PARTS[@]}"; exit 1; }
-          expected=1
-          for p in "${PARTS[@]}"; do
-            b="$(basename "$p")"
-            [[ "$b" =~ Part([0-9]+) ]] || { echo "ERROR: invalid part: $b"; exit 1; }
-            [ "${BASH_REMATCH[1]}" -eq "$expected" ] || { echo "ERROR: expected Part${expected}, found $b"; exit 1; }
-            expected=$((expected + 1))
-          done
+          mapfile -t PARTS < <(find . -maxdepth 2 -type f -name '*.zip' -print0 | while IFS= read -r -d '' f; do b="$(basename "$f")"; if [[ "$b" =~ Part([0-9]+)(-[^/]*)?\.zip$ ]]; then printf '%d\t%s\n' "${BASH_REMATCH[1]}" "$f"; fi; done | sort -n -k1,1 | cut -f2-)
+          [ "${#PARTS[@]}" -eq 3 ] || { echo "ERROR: expected 3 source parts, found ${#PARTS[@]}"; printf '%s\n' "${PARTS[@]}"; exit 1; }
+          for i in 0 1 2; do n=$((i+1)); b="$(basename "${PARTS[$i]}")"; [[ "$b" =~ Part([0-9]+) ]] && [ "${BASH_REMATCH[1]}" -eq "$n" ] || { echo "ERROR: bad source part order: $b"; exit 1; }; done
           cat "${PARTS[@]}" > source.zip
           unzip -t source.zip
           rm -rf _source
@@ -59,7 +45,6 @@ jobs:
           echo "PROJECT_DIR=$D" >> "$GITHUB_ENV"
           sed -i 's/\r$//' "$D/gradlew"
           chmod +x "$D/gradlew"
-          echo "PROJECT_DIR=$D"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -78,92 +63,48 @@ jobs:
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" "ndk;${ANDROID_NDK}" "cmake;${CMAKE_VERSION}"
 
-      - name: Normalize RakNet tree and CMake sources
+      - name: Normalize RakNet source tree
         shell: bash
         run: |
           set -euo pipefail
-          C="$PROJECT_DIR/app/src/main/cpp"
-          S="$C/samp"
+          S="$PROJECT_DIR/app/src/main/cpp/samp"
           V="$S/vendor"
-          [ -d "$S" ] || { echo "ERROR: samp directory not found: $S"; exit 1; }
-          [ -d "$V" ] || { echo "ERROR: vendor directory not found: $V"; exit 1; }
+          test -d "$S" || { echo "ERROR: missing $S"; exit 1; }
+          test -d "$V" || { echo "ERROR: missing $V"; exit 1; }
           mapfile -t RAK_DIRS < <(find "$V" -mindepth 1 -maxdepth 1 -type d -iname 'raknet' -print | sort)
           [ "${#RAK_DIRS[@]}" -gt 0 ] || { echo 'ERROR: no RakNet directory found'; find "$V" -maxdepth 2 -type d -print; exit 1; }
-          chosen=""
-          best=0
+          chosen=""; best=0
           for d in "${RAK_DIRS[@]}"; do
             n="$(find "$d" -type f \( -iname '*.cpp' -o -iname '*.cc' -o -iname '*.cxx' \) | wc -l)"
-            echo "RakNet candidate: $d ($n implementation files)"
+            echo "RakNet candidate: $d -> $n source files"
             if [ "$n" -gt "$best" ]; then best="$n"; chosen="$d"; fi
           done
-          [ -n "$chosen" ] && [ "$best" -gt 0 ] || { echo 'ERROR: no RakNet implementation tree found'; exit 1; }
-          tmp="$V/.raknet-normalized"
+          [ -n "$chosen" ] && [ "$best" -gt 0 ] || { echo 'ERROR: no RakNet implementation files found'; exit 1; }
+          tmp="$V/.raknet-final"
           rm -rf "$tmp"
-          if [ "$chosen" != "$V/raknet" ]; then mv "$chosen" "$tmp"; else cp -a "$chosen" "$tmp"; fi
-          for d in "${RAK_DIRS[@]}"; do [ "$d" = "$chosen" ] || rm -rf "$d"; done
-          rm -rf "$V/raknet"
+          cp -a "$chosen" "$tmp"
+          for d in "${RAK_DIRS[@]}"; do
+            [ "$d" = "$chosen" ] || {
+              while IFS= read -r -d '' h; do
+                rel="${h#"$d"/}"; dst="$tmp/$rel"; mkdir -p "$(dirname "$dst")"; cp -n "$h" "$dst" || true
+              done < <(find "$d" -type f \( -iname '*.h' -o -iname '*.hpp' -o -iname '*.inl' \) -print0)
+            }
+          done
+          rm -rf "${RAK_DIRS[@]}"
           mv "$tmp" "$V/raknet"
+
           while IFS= read -r -d '' f; do
             case "$f" in
               *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.inl|CMakeLists.txt|*.cmake)
-                sed -i -e 's#vendor/RakNet/#vendor/raknet/#g' -e 's#vendor/RAKNET/#vendor/raknet/#g' -e 's#vendor/Raknet/#vendor/raknet/#g' "$f" || true
+                sed -i -e 's#vendor/RakNet/#vendor/raknet/#g' -e 's#vendor/RAKNET/#vendor/raknet/#g' -e 's#vendor/Raknet/#vendor/raknet/#g' -e 's#vendor/rakNET/#vendor/raknet/#g' "$f"
                 ;;
             esac
           done < <(find "$S" -type f -print0)
-          compat="$V/RakNet"
-          rm -rf "$compat"
-          mkdir -p "$compat"
-          while IFS= read -r -d '' f; do
-            rel="${f#"$V/raknet"/}"
-            dst="$compat/$rel"
-            mkdir -p "$(dirname "$dst")"
-            cp -f "$f" "$dst"
-          done < <(find "$V/raknet" -type f \( -iname '*.h' -o -iname '*.hpp' -o -iname '*.inl' \) -print0)
-          find "$compat" -type f \( -iname '*.c' -o -iname '*.cc' -o -iname '*.cpp' -o -iname '*.cxx' \) -delete
-          CMAKE="$S/CMakeLists.txt"
-          if [ -f "$CMAKE" ]; then
-            python3 - "$CMAKE" <<'PY'
-from pathlib import Path
-import sys
-p=Path(sys.argv[1]); t=p.read_text(encoding='utf-8'); marker='# DEXIN_FINAL_SOURCE_DEDUP'
-if marker not in t:
-    t=t.rstrip()+r'''
 
-# DEXIN_FINAL_SOURCE_DEDUP
-if(TARGET samp)
-  get_target_property(_dexin_sources samp SOURCES)
-  if(_dexin_sources)
-    list(REMOVE_DUPLICATES _dexin_sources)
-    set(_dexin_out "")
-    foreach(_dexin_src IN LISTS _dexin_sources)
-      get_filename_component(_dexin_abs "${_dexin_src}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
-      get_filename_component(_dexin_name "${_dexin_abs}" NAME)
-      string(TOLOWER "${_dexin_abs}" _dexin_lower)
-      set(_dexin_skip FALSE)
-      if(_dexin_name MATCHES "^(BitStream|DS_ByteQueue|PluginInterface|PluginInterface2|RakPeer|RakClient|RakNetCommandParser|NetworkTypes|DS_HuffmanEncodingTree|DS_Table)\\.(c|cc|cpp|cxx)$")
-        if(NOT _dexin_lower MATCHES "/vendor/raknet/")
-          set(_dexin_skip TRUE)
-        endif()
-      endif()
-      if(NOT _dexin_skip)
-        list(APPEND _dexin_out "${_dexin_src}")
-      endif()
-    endforeach()
-    list(REMOVE_DUPLICATES _dexin_out)
-    set_property(TARGET samp PROPERTY SOURCES "${_dexin_out}")
-  endif()
-endif()
-'''
-    p.write_text(t,encoding='utf-8')
-PY
-          fi
-          echo '--- Final RakNet layout ---'
+          echo '--- RakNet final layout ---'
           find "$V" -mindepth 1 -maxdepth 1 -type d -iname '*raknet*' -print | sort
-          echo '--- Canonical implementation count ---'
+          echo '--- RakNet implementation count ---'
           find "$V/raknet" -type f \( -iname '*.cpp' -o -iname '*.cc' -o -iname '*.cxx' \) | wc -l
-          echo '--- Compatibility implementation count (MUST BE 0) ---'
-          n="$(find "$V/RakNet" -type f \( -iname '*.c' -o -iname '*.cc' -o -iname '*.cpp' -o -iname '*.cxx' \) | wc -l)"
-          [ "$n" -eq 0 ] || { echo 'ERROR: duplicate RakNet implementation files remain'; exit 1; }
 
       - name: Fix Linux native include paths
         shell: bash
@@ -172,24 +113,21 @@ PY
           C="$PROJECT_DIR/app/src/main/cpp"
           S="$C/samp"
           mkdir -p "$S/gui/samp_widgets" "$S/game"
-          copy_case_insensitive() {
-            local pattern="$1" target="$2" found
-            found="$(find "$C" -type f -iname "$pattern" -print -quit || true)"
-            [ -n "$found" ] || { echo "ERROR: required header '$pattern' was not found"; exit 1; }
-            cp -f "$found" "$target"
-          }
-          copy_case_insensitive 'playerTabList.h' "$S/gui/samp_widgets/playerTabList.h"
-          copy_case_insensitive 'RGBA.h' "$S/game/RGBA.h"
+          copy_header() { local pattern="$1" target="$2" found; found="$(find "$C" -type f -iname "$pattern" -print -quit || true)"; [ -n "$found" ] || { echo "ERROR: header $pattern not found"; exit 1; }; cp -f "$found" "$target"; }
+          copy_header 'playerTabList.h' "$S/gui/samp_widgets/playerTabList.h"
+          copy_header 'RGBA.h' "$S/game/RGBA.h"
 
-      - name: Verify source tree
+      - name: Verify unique native tree
         shell: bash
         run: |
           set -euo pipefail
           S="$PROJECT_DIR/app/src/main/cpp/samp"
-          test -d "$S/vendor/raknet"
-          test -d "$S/vendor/RakNet"
-          bad="$(find "$S/vendor/RakNet" -type f \( -iname '*.c' -o -iname '*.cc' -o -iname '*.cpp' -o -iname '*.cxx' \) -print)"
-          [ -z "$bad" ] || { echo "$bad"; exit 1; }
+          V="$S/vendor"
+          test -d "$V/raknet"
+          if find "$V" -mindepth 1 -maxdepth 1 -type d -iname 'raknet' | grep -v '/raknet$' | grep -q .; then echo 'ERROR: duplicate-case RakNet directory remains'; exit 1; fi
+          bad="$(find "$V/raknet" -type f \( -iname '*.c' -o -iname '*.cc' -o -iname '*.cpp' -o -iname '*.cxx' \) -print | wc -l)"
+          [ "$bad" -gt 0 ] || { echo 'ERROR: canonical RakNet tree has no source files'; exit 1; }
+          echo 'OK: exactly one canonical RakNet implementation tree exists.'
 
       - name: Remove native build caches
         shell: bash
@@ -207,31 +145,14 @@ PY
           : > /tmp/gradle-build.log
           ./gradlew --no-daemon --stacktrace --warning-mode all clean 2>&1 | tee -a /tmp/gradle-build.log
           s=${PIPESTATUS[0]}
-          if [ "$s" -eq 0 ]; then
-            ./gradlew --no-daemon --stacktrace --warning-mode all :app:assembleRelease 2>&1 | tee -a /tmp/gradle-build.log
-            s=${PIPESTATUS[0]}
-          fi
+          if [ "$s" -eq 0 ]; then ./gradlew --no-daemon --stacktrace --warning-mode all :app:assembleRelease 2>&1 | tee -a /tmp/gradle-build.log; s=${PIPESTATUS[0]}; fi
           echo "GRADLE_EXIT=$s" >> /tmp/gradle-build.log
           exit "$s"
 
-      - name: Show Gradle diagnostics in Summary
+      - name: Show diagnostics
         if: always()
-        shell: bash
         run: |
-          {
-            echo '## Dexin Mobile — Build diagnostics'
-            echo
-            echo "**Build Release APK:** ${{ steps.gradle_build.outcome }}"
-            echo
-            echo '```text'
-            grep -nEi 'error:|fatal error:|FAILED:|FAILURE:|Execution failed|What went wrong|Caused by:|Could not find|Could not resolve|undefined reference|duplicate class|duplicate symbol|GRADLE_EXIT=' /tmp/gradle-build.log | tail -n 250 || true
-            echo '```'
-            echo
-            echo '### Last 300 lines'
-            echo '```text'
-            tail -n 300 /tmp/gradle-build.log || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          { echo '## Dexin Mobile build diagnostics'; echo '```text'; grep -nEi 'error:|fatal error:|FAILED:|FAILURE:|Execution failed|duplicate symbol|undefined reference|Could not find|GRADLE_EXIT=' /tmp/gradle-build.log | tail -n 250 || true; echo '```'; echo; echo '### Last 300 lines'; echo '```text'; tail -n 300 /tmp/gradle-build.log || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload diagnostic log
         if: always()
@@ -247,7 +168,6 @@ PY
         run: exit 1
 
       - name: Copy APK
-        shell: bash
         run: |
           set -euo pipefail
           APK="$(find "$PROJECT_DIR/app/build/outputs/apk/release" -maxdepth 1 -type f -name '*.apk' -print -quit)"
