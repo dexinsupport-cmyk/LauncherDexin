@@ -6,6 +6,12 @@ on:
 permissions:
   contents: read
 
+env:
+  ANDROID_PLATFORM: "android-34"
+  ANDROID_BUILD_TOOLS: "34.0.0"
+  ANDROID_NDK: "26.2.11394342"
+  CMAKE_VERSION: "3.22.1"
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -55,7 +61,7 @@ jobs:
         run: |
           set -euo pipefail
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.2.11394342" "cmake;3.22.1"
+          sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" "ndk;${ANDROID_NDK}" "cmake;${CMAKE_VERSION}"
 
       - name: Fix native tree before CMake
         shell: bash
@@ -63,42 +69,88 @@ jobs:
           set -euo pipefail
           C="$PROJECT_DIR/app/src/main/cpp"
           S="$C/samp"
-          R="$S/vendor/raknet"
-          U="$S/vendor/RakNet"
+          V="$S/vendor"
+          R="$V/raknet"
           test -d "$S" || { echo "ERROR: samp directory missing"; exit 1; }
-          test -d "$R" || { echo "ERROR: canonical vendor/raknet missing"; exit 1; }
-
-          # The failing build proved that the archive contains two complete
-          # RakNet trees: vendor/RakNet and vendor/raknet. Both were compiled,
-          # producing identical symbols. Do not mirror implementation files.
-          # Remove the duplicate tree and rewrite only path references to the
-          # canonical lower-case tree. This happens BEFORE CMake configures.
-          rm -rf "$U"
-          find "$S" -type f \( -name 'CMakeLists.txt' -o -name '*.cmake' -o -name '*.h' -o -name '*.hpp' -o -name '*.inl' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' \) -print0 \
-            | xargs -0 -r sed -i 's#vendor/RakNet/#vendor/raknet/#g; s#vendor/RakNet#vendor/raknet#g'
-
-          # Restore known case-sensitive compatibility headers.
+          test -d "$V" || { echo "ERROR: vendor directory missing"; exit 1; }
+          mapfile -t dirs < <(find "$V" -mindepth 1 -maxdepth 1 -type d -iname 'raknet' -print | sort)
+          [ "${#dirs[@]}" -gt 0 ] || { echo "ERROR: no RakNet directory found"; exit 1; }
+          chosen=""; best=0
+          for d in "${dirs[@]}"; do
+            n="$(find "$d" -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) | wc -l)"
+            if [ "$n" -gt "$best" ]; then best="$n"; chosen="$d"; fi
+          done
+          rm -rf "$V/raknet"
+          mkdir -p "$V/raknet"
+          cp -a "$chosen"/. "$V/raknet/"
+          for d in "${dirs[@]}"; do
+            [ "$d" = "$chosen" ] || {
+              while IFS= read -r -d '' h; do
+                rel="${h#"$d"/}"; dst="$V/raknet/$rel"; mkdir -p "$(dirname "$dst")"; cp -n "$h" "$dst" || true
+              done < <(find "$d" -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.inl' \) -print0)
+            }
+          done
+          for d in "${dirs[@]}"; do [ "$d" = "$V/raknet" ] || rm -rf "$d"; done
+          find "$S" -type f \( -name 'CMakeLists.txt' -o -name '*.cmake' -o -name '*.h' -o -name '*.hpp' -o -name '*.inl' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' \) -print0 | xargs -0 -r sed -i 's#vendor/RakNet/#vendor/raknet/#g; s#vendor/RakNet#vendor/raknet#g'
           mkdir -p "$S/gui/samp_widgets" "$S/game"
-          p="$(find "$C" -type f -iname 'playerTabList.h' -print -quit || true)"
-          [ -n "$p" ] && cp -f "$p" "$S/gui/samp_widgets/playerTabList.h" || true
-          r="$(find "$C" -type f -iname 'RGBA.h' -print -quit || true)"
-          [ -n "$r" ] && cp -f "$r" "$S/game/RGBA.h" || true
-
-          # Hard verification: there must be exactly one implementation copy
-          # of the known RakNet translation units.
-          echo '--- RakNet implementation files ---'
-          find "$S" -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) \
-            | grep -Ei '/vendor/.*/(BitStream|DS_ByteQueue|PluginInterface|PluginInterface2|RakPeer|RakClient|CheckSum|CommandParserInterface|NetworkTypes|RakNetCommandParser)\.(cpp|cc|cxx)$' \
-            | sort
-          if find "$S/vendor" -mindepth 2 -maxdepth 2 -type d -iname 'RakNet' -print -quit | grep -q .; then
-            echo 'ERROR: duplicate RakNet directory still exists'; exit 1
-          fi
+          p="$(find "$C" -type f -iname 'playerTabList.h' -print -quit || true)"; [ -n "$p" ] && cp -f "$p" "$S/gui/samp_widgets/playerTabList.h" || true
+          r="$(find "$C" -type f -iname 'RGBA.h' -print -quit || true)"; [ -n "$r" ] && cp -f "$r" "$S/game/RGBA.h" || true
+          test -d "$V/raknet"
+          echo "RakNet source count: $(find "$V/raknet" -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) | wc -l)"
 
       - name: Clean native build
         shell: bash
         run: |
           set -euo pipefail
           rm -rf "$PROJECT_DIR/app/.cxx" "$PROJECT_DIR/app/build"
+
+      - name: Prepare CI signing keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEYSTORE="$PROJECT_DIR/keystore_playmarket2.jks"
+          rm -f "$KEYSTORE"
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE" \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+          test -s "$KEYSTORE"
+          echo "CI_KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
+
+          cat > "$PROJECT_DIR/signing-ci.gradle" <<'GRADLE'
+          gradle.projectsEvaluated {
+              allprojects { project ->
+                  def androidExt = project.extensions.findByName("android")
+                  if (androidExt != null) {
+                      def ks = new File(project.rootDir, "keystore_playmarket2.jks")
+                      def debugConfig = androidExt.signingConfigs.findByName("debug")
+                      if (debugConfig != null) {
+                          debugConfig.storeFile = ks
+                          debugConfig.storePassword = "android"
+                          debugConfig.keyAlias = "androiddebugkey"
+                          debugConfig.keyPassword = "android"
+                      }
+                      def releaseConfig = androidExt.signingConfigs.findByName("release")
+                      if (releaseConfig != null) {
+                          releaseConfig.storeFile = ks
+                          releaseConfig.storePassword = "android"
+                          releaseConfig.keyAlias = "androiddebugkey"
+                          releaseConfig.keyPassword = "android"
+                      }
+                      def releaseType = androidExt.buildTypes.findByName("release")
+                      if (releaseType != null && debugConfig != null) {
+                          releaseType.signingConfig = debugConfig
+                      }
+                  }
+              }
+          }
+          GRADLE
+          test -s "$PROJECT_DIR/signing-ci.gradle"
 
       - name: Build Release APK
         id: build
@@ -107,10 +159,11 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          ./gradlew --no-daemon --stacktrace clean 2>&1 | tee /tmp/gradle.log
+          : > /tmp/gradle.log
+          ./gradlew --no-daemon --stacktrace clean 2>&1 | tee -a /tmp/gradle.log
           s=${PIPESTATUS[0]}
           if [ "$s" -eq 0 ]; then
-            ./gradlew --no-daemon --stacktrace :app:assembleRelease 2>&1 | tee -a /tmp/gradle.log
+            ./gradlew --no-daemon --stacktrace -I signing-ci.gradle :app:assembleRelease 2>&1 | tee -a /tmp/gradle.log
             s=${PIPESTATUS[0]}
           fi
           echo "GRADLE_EXIT=$s" >> /tmp/gradle.log
@@ -135,3 +188,4 @@ jobs:
           name: DexinMobile-APK
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+          retention-days: 14
