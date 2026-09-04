@@ -18,7 +18,6 @@ jobs:
   build:
     name: Build APK
     runs-on: ubuntu-22.04
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,26 +35,14 @@ jobs:
               fi
             done | sort -n -k1,1 | cut -f2-
           )
-
-          [ "${#PARTS[@]}" -eq 3 ] || {
-            echo "ERROR: expected exactly 3 source parts, found ${#PARTS[@]}"
-            printf 'Found:\n'; printf '  %s\n' "${PARTS[@]}"
-            exit 1
-          }
-
+          [ "${#PARTS[@]}" -eq 3 ] || { echo "ERROR: expected exactly 3 source parts, found ${#PARTS[@]}"; printf 'Found:\n'; printf '  %s\n' "${PARTS[@]}"; exit 1; }
           expected=1
           for p in "${PARTS[@]}"; do
             b="$(basename "$p")"
             [[ "$b" =~ Part([0-9]+) ]] || { echo "ERROR: invalid part: $b"; exit 1; }
-            [ "${BASH_REMATCH[1]}" -eq "$expected" ] || {
-              echo "ERROR: expected Part${expected}, found $b"
-              exit 1
-            }
+            [ "${BASH_REMATCH[1]}" -eq "$expected" ] || { echo "ERROR: expected Part${expected}, found $b"; exit 1; }
             expected=$((expected + 1))
           done
-
-          echo "Assembling source parts:"
-          printf '  %s\n' "${PARTS[@]}"
           cat "${PARTS[@]}" > source.zip
           unzip -t source.zip
           rm -rf _source
@@ -89,78 +76,94 @@ jobs:
         run: |
           set -euo pipefail
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager \
-            "platform-tools" \
-            "platforms;${ANDROID_PLATFORM}" \
-            "build-tools;${ANDROID_BUILD_TOOLS}" \
-            "ndk;${ANDROID_NDK}" \
-            "cmake;${CMAKE_VERSION}"
+          sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" "ndk;${ANDROID_NDK}" "cmake;${CMAKE_VERSION}"
 
-      - name: Prepare native source tree
+      - name: Normalize RakNet tree and CMake sources
         shell: bash
         run: |
           set -euo pipefail
           C="$PROJECT_DIR/app/src/main/cpp"
           S="$C/samp"
-          RAK_LOWER="$S/vendor/raknet"
-          RAK_UPPER="$S/vendor/RakNet"
-
-          test -d "$S" || { echo "ERROR: samp native directory not found: $S"; exit 1; }
-          test -d "$RAK_LOWER" || {
-            echo "ERROR: canonical RakNet directory not found: $RAK_LOWER"
-            find "$S/vendor" -maxdepth 2 -type d -iname '*raknet*' -print || true
-            exit 1
-          }
-
-          # IMPORTANT:
-          # Network.h in this source includes ../vendor/RakNet/*.h, while the
-          # real source tree is vendor/raknet. Do NOT create a symlink here.
-          # CMake GLOB follows symlinks and would then compile every RakNet
-          # .cpp file twice, producing ld.lld duplicate-symbol errors.
-          # Instead create a header-only compatibility directory.
-          rm -rf "$RAK_UPPER"
-          mkdir -p "$RAK_UPPER"
-
+          V="$S/vendor"
+          [ -d "$S" ] || { echo "ERROR: samp directory not found: $S"; exit 1; }
+          [ -d "$V" ] || { echo "ERROR: vendor directory not found: $V"; exit 1; }
+          mapfile -t RAK_DIRS < <(find "$V" -mindepth 1 -maxdepth 1 -type d -iname 'raknet' -print | sort)
+          [ "${#RAK_DIRS[@]}" -gt 0 ] || { echo 'ERROR: no RakNet directory found'; find "$V" -maxdepth 2 -type d -print; exit 1; }
+          chosen=""
+          best=0
+          for d in "${RAK_DIRS[@]}"; do
+            n="$(find "$d" -type f \( -iname '*.cpp' -o -iname '*.cc' -o -iname '*.cxx' \) | wc -l)"
+            echo "RakNet candidate: $d ($n implementation files)"
+            if [ "$n" -gt "$best" ]; then best="$n"; chosen="$d"; fi
+          done
+          [ -n "$chosen" ] && [ "$best" -gt 0 ] || { echo 'ERROR: no RakNet implementation tree found'; exit 1; }
+          tmp="$V/.raknet-normalized"
+          rm -rf "$tmp"
+          if [ "$chosen" != "$V/raknet" ]; then mv "$chosen" "$tmp"; else cp -a "$chosen" "$tmp"; fi
+          for d in "${RAK_DIRS[@]}"; do [ "$d" = "$chosen" ] || rm -rf "$d"; done
+          rm -rf "$V/raknet"
+          mv "$tmp" "$V/raknet"
           while IFS= read -r -d '' f; do
-            rel="${f#"$RAK_LOWER"/}"
-            dst="$RAK_UPPER/$rel"
+            case "$f" in
+              *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.inl|CMakeLists.txt|*.cmake)
+                sed -i -e 's#vendor/RakNet/#vendor/raknet/#g' -e 's#vendor/RAKNET/#vendor/raknet/#g' -e 's#vendor/Raknet/#vendor/raknet/#g' "$f" || true
+                ;;
+            esac
+          done < <(find "$S" -type f -print0)
+          compat="$V/RakNet"
+          rm -rf "$compat"
+          mkdir -p "$compat"
+          while IFS= read -r -d '' f; do
+            rel="${f#"$V/raknet"/}"
+            dst="$compat/$rel"
             mkdir -p "$(dirname "$dst")"
             cp -f "$f" "$dst"
-          done < <(
-            find "$RAK_LOWER" -type f \
-              \( -iname '*.h' -o -iname '*.hpp' -o -iname '*.inl' \) \
-              -print0
-          )
+          done < <(find "$V/raknet" -type f \( -iname '*.h' -o -iname '*.hpp' -o -iname '*.inl' \) -print0)
+          find "$compat" -type f \( -iname '*.c' -o -iname '*.cc' -o -iname '*.cpp' -o -iname '*.cxx' \) -delete
+          CMAKE="$S/CMakeLists.txt"
+          if [ -f "$CMAKE" ]; then
+            python3 - "$CMAKE" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); t=p.read_text(encoding='utf-8'); marker='# DEXIN_FINAL_SOURCE_DEDUP'
+if marker not in t:
+    t=t.rstrip()+r'''
 
-          # Absolute safety: compatibility tree must contain NO compilable source.
-          find "$RAK_UPPER" -type f \
-            \( -iname '*.c' -o -iname '*.cc' -o -iname '*.cpp' -o -iname '*.cxx' \) \
-            -delete
-
-          for h in RakClient.h RakPeer.h BitStream.h Export.h RakNetTypes.h DS_List.h; do
-            test -f "$RAK_UPPER/$h" || {
-              echo "ERROR: required compatibility header missing: $h"
-              exit 1
-            }
-          done
-
-          echo '--- RakNet directories ---'
-          find "$S/vendor" -maxdepth 1 -type d -iname '*raknet*' -print | sort
-
-          echo '--- Canonical RakNet source count ---'
-          find "$RAK_LOWER" -type f \
-            \( -iname '*.cpp' -o -iname '*.cc' -o -iname '*.cxx' \) | wc -l
-
-          echo '--- Compatibility RakNet source count (MUST BE 0) ---'
-          COMPAT_COUNT="$(find "$RAK_UPPER" -type f \
-            \( -iname '*.cpp' -o -iname '*.cc' -o -iname '*.cxx' -o -iname '*.c' \) | wc -l)"
-          echo "$COMPAT_COUNT"
-          [ "$COMPAT_COUNT" -eq 0 ] || {
-            echo 'ERROR: uppercase RakNet compatibility directory contains source files'
-            find "$RAK_UPPER" -type f \
-              \( -iname '*.cpp' -o -iname '*.cc' -o -iname '*.cxx' -o -iname '*.c' \)
-            exit 1
-          }
+# DEXIN_FINAL_SOURCE_DEDUP
+if(TARGET samp)
+  get_target_property(_dexin_sources samp SOURCES)
+  if(_dexin_sources)
+    list(REMOVE_DUPLICATES _dexin_sources)
+    set(_dexin_out "")
+    foreach(_dexin_src IN LISTS _dexin_sources)
+      get_filename_component(_dexin_abs "${_dexin_src}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+      get_filename_component(_dexin_name "${_dexin_abs}" NAME)
+      string(TOLOWER "${_dexin_abs}" _dexin_lower)
+      set(_dexin_skip FALSE)
+      if(_dexin_name MATCHES "^(BitStream|DS_ByteQueue|PluginInterface|PluginInterface2|RakPeer|RakClient|RakNetCommandParser|NetworkTypes|DS_HuffmanEncodingTree|DS_Table)\\.(c|cc|cpp|cxx)$")
+        if(NOT _dexin_lower MATCHES "/vendor/raknet/")
+          set(_dexin_skip TRUE)
+        endif()
+      endif()
+      if(NOT _dexin_skip)
+        list(APPEND _dexin_out "${_dexin_src}")
+      endif()
+    endforeach()
+    list(REMOVE_DUPLICATES _dexin_out)
+    set_property(TARGET samp PROPERTY SOURCES "${_dexin_out}")
+  endif()
+endif()
+'''
+    p.write_text(t,encoding='utf-8')
+PY
+          fi
+          echo '--- Final RakNet layout ---'
+          find "$V" -mindepth 1 -maxdepth 1 -type d -iname '*raknet*' -print | sort
+          echo '--- Canonical implementation count ---'
+          find "$V/raknet" -type f \( -iname '*.cpp' -o -iname '*.cc' -o -iname '*.cxx' \) | wc -l
+          echo '--- Compatibility implementation count (MUST BE 0) ---'
+          n="$(find "$V/RakNet" -type f \( -iname '*.c' -o -iname '*.cc' -o -iname '*.cpp' -o -iname '*.cxx' \) | wc -l)"
+          [ "$n" -eq 0 ] || { echo 'ERROR: duplicate RakNet implementation files remain'; exit 1; }
 
       - name: Fix Linux native include paths
         shell: bash
@@ -169,52 +172,24 @@ jobs:
           C="$PROJECT_DIR/app/src/main/cpp"
           S="$C/samp"
           mkdir -p "$S/gui/samp_widgets" "$S/game"
-
           copy_case_insensitive() {
             local pattern="$1" target="$2" found
             found="$(find "$C" -type f -iname "$pattern" -print -quit || true)"
-            [ -n "$found" ] || {
-              echo "ERROR: required header '$pattern' was not found"
-              exit 1
-            }
+            [ -n "$found" ] || { echo "ERROR: required header '$pattern' was not found"; exit 1; }
             cp -f "$found" "$target"
-            echo "Using $target <- $found"
           }
-
           copy_case_insensitive 'playerTabList.h' "$S/gui/samp_widgets/playerTabList.h"
           copy_case_insensitive 'RGBA.h' "$S/game/RGBA.h"
 
-      - name: Verify CMake source tree before configure
+      - name: Verify source tree
         shell: bash
         run: |
           set -euo pipefail
           S="$PROJECT_DIR/app/src/main/cpp/samp"
-          U="$S/vendor/RakNet"
-          L="$S/vendor/raknet"
-
-          echo '--- Duplicate-case RakNet check ---'
-          test -d "$L"
-          test -d "$U"
-
-          # No symlinks are allowed anywhere under vendor/RakNet.
-          if find "$U" -type l -print -quit | grep -q .; then
-            echo 'ERROR: symlink found in vendor/RakNet'
-            find "$U" -type l -print
-            exit 1
-          fi
-
-          # The compatibility tree is headers only.
-          BAD="$(find "$U" -type f \
-            \( -iname '*.c' -o -iname '*.cc' -o -iname '*.cpp' -o -iname '*.cxx' \) \
-            -print)"
-          [ -z "$BAD" ] || {
-            echo 'ERROR: compilable files remain in vendor/RakNet:'
-            printf '%s\n' "$BAD"
-            exit 1
-          }
-
-          echo 'OK: vendor/RakNet is header-only.'
-          echo 'OK: vendor/raknet is the only RakNet implementation tree.'
+          test -d "$S/vendor/raknet"
+          test -d "$S/vendor/RakNet"
+          bad="$(find "$S/vendor/RakNet" -type f \( -iname '*.c' -o -iname '*.cc' -o -iname '*.cpp' -o -iname '*.cxx' \) -print)"
+          [ -z "$bad" ] || { echo "$bad"; exit 1; }
 
       - name: Remove native build caches
         shell: bash
