@@ -92,7 +92,6 @@ jobs:
           done
           rm -rf "${RAK_DIRS[@]}"
           mv "$tmp" "$V/raknet"
-
           while IFS= read -r -d '' f; do
             case "$f" in
               *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.inl|CMakeLists.txt|*.cmake)
@@ -100,7 +99,6 @@ jobs:
                 ;;
             esac
           done < <(find "$S" -type f -print0)
-
           echo '--- RakNet final layout ---'
           find "$V" -mindepth 1 -maxdepth 1 -type d -iname '*raknet*' -print | sort
           echo '--- RakNet implementation count ---'
@@ -135,6 +133,27 @@ jobs:
           set -euo pipefail
           rm -rf "$PROJECT_DIR/app/.cxx" "$PROJECT_DIR/app/build"
 
+      - name: Prepare CI release signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$PROJECT_DIR/signing-ci.gradle" <<'GRADLE'
+          allprojects {
+              afterEvaluate { project ->
+                  def androidExt = project.extensions.findByName("android")
+                  if (androidExt != null) {
+                      def releaseType = androidExt.buildTypes.findByName("release")
+                      def debugConfig = androidExt.signingConfigs.findByName("debug")
+                      if (releaseType != null && debugConfig != null) {
+                          releaseType.signingConfig = debugConfig
+                      }
+                  }
+              }
+          }
+          GRADLE
+          test -s "$PROJECT_DIR/signing-ci.gradle"
+          echo "CI signing override prepared"
+
       - name: Build Release APK
         id: gradle_build
         working-directory: ${{ env.PROJECT_DIR }}
@@ -145,14 +164,14 @@ jobs:
           : > /tmp/gradle-build.log
           ./gradlew --no-daemon --stacktrace --warning-mode all clean 2>&1 | tee -a /tmp/gradle-build.log
           s=${PIPESTATUS[0]}
-          if [ "$s" -eq 0 ]; then ./gradlew --no-daemon --stacktrace --warning-mode all :app:assembleRelease 2>&1 | tee -a /tmp/gradle-build.log; s=${PIPESTATUS[0]}; fi
+          if [ "$s" -eq 0 ]; then ./gradlew --no-daemon --stacktrace --warning-mode all -I signing-ci.gradle :app:assembleRelease 2>&1 | tee -a /tmp/gradle-build.log; s=${PIPESTATUS[0]}; fi
           echo "GRADLE_EXIT=$s" >> /tmp/gradle-build.log
           exit "$s"
 
       - name: Show diagnostics
         if: always()
         run: |
-          { echo '## Dexin Mobile build diagnostics'; echo '```text'; grep -nEi 'error:|fatal error:|FAILED:|FAILURE:|Execution failed|duplicate symbol|undefined reference|Could not find|GRADLE_EXIT=' /tmp/gradle-build.log | tail -n 250 || true; echo '```'; echo; echo '### Last 300 lines'; echo '```text'; tail -n 300 /tmp/gradle-build.log || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '## Dexin Mobile build diagnostics'; echo '```text'; grep -nEi 'error:|fatal error:|FAILED:|FAILURE:|Execution failed|duplicate symbol|undefined reference|Could not find|validateSigning|signing|GRADLE_EXIT=' /tmp/gradle-build.log | tail -n 300 || true; echo '```'; echo; echo '### Last 300 lines'; echo '```text'; tail -n 300 /tmp/gradle-build.log || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload diagnostic log
         if: always()
