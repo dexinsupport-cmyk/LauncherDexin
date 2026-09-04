@@ -121,13 +121,13 @@ jobs:
           keytool -list -keystore "$KEYSTORE" -storepass android >/dev/null
           echo "CI_KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
 
-      - name: Force test signing and remove Play Store release dependency
+      - name: Override signing config for CI test build
         shell: bash
         run: |
           set -euo pipefail
           cat > "$PROJECT_DIR/signing-ci.gradle" <<'GRADLE'
-gradle.projectsEvaluated {
-    allprojects { project ->
+allprojects { project ->
+    project.afterEvaluate {
         def androidExt = project.extensions.findByName("android")
         if (androidExt != null) {
             def ks = new File(project.rootDir, "keystore_playmarket2.jks")
@@ -142,10 +142,8 @@ gradle.projectsEvaluated {
     }
 }
 GRADLE
-
           test -f "$PROJECT_DIR/keystore_playmarket2.jks"
           test -s "$PROJECT_DIR/signing-ci.gradle"
-          echo "Test signing configured: $PROJECT_DIR/keystore_playmarket2.jks"
 
       - name: Build Debug APK for testing
         id: build
