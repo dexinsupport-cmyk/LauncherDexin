@@ -103,18 +103,50 @@ jobs:
       - name: Remove native build caches
         run: rm -rf "$PROJECT_DIR/app/.cxx" "$PROJECT_DIR/app/build"
 
-      - name: Prepare unsigned CI release build
+      - name: Prepare CI signing keystore
         shell: bash
         run: |
           set -euo pipefail
+          KEYSTORE="$PROJECT_DIR/keystore_playmarket2.jks"
+          rm -f "$KEYSTORE"
+          keytool -genkeypair \
+            -keystore "$KEYSTORE" \
+            -storepass dexinmobile-ci \
+            -keypass dexinmobile-ci \
+            -alias dexinmobile \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Dexin Mobile, OU=Dexin, O=Dexin Mobile, L=Tehran, ST=Tehran, C=IR" \
+            -noprompt
+          test -s "$KEYSTORE"
+          echo "CI_KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
+
           cat > "$PROJECT_DIR/signing-ci.gradle" <<'GRADLE'
           allprojects { p ->
               p.afterEvaluate {
                   def androidExt = p.extensions.findByName('android')
                   if (androidExt != null) {
+                      def debugSigning = androidExt.signingConfigs.findByName('debug')
+                      if (debugSigning != null) {
+                          debugSigning.storeFile = file(System.getenv('CI_KEYSTORE'))
+                          debugSigning.storePassword = 'dexinmobile-ci'
+                          debugSigning.keyAlias = 'dexinmobile'
+                          debugSigning.keyPassword = 'dexinmobile-ci'
+                      }
+
+                      def releaseSigning = androidExt.signingConfigs.findByName('release')
+                      if (releaseSigning == null) {
+                          releaseSigning = androidExt.signingConfigs.create('release')
+                      }
+                      releaseSigning.storeFile = file(System.getenv('CI_KEYSTORE'))
+                      releaseSigning.storePassword = 'dexinmobile-ci'
+                      releaseSigning.keyAlias = 'dexinmobile'
+                      releaseSigning.keyPassword = 'dexinmobile-ci'
+
                       def releaseType = androidExt.buildTypes.findByName('release')
                       if (releaseType != null) {
-                          releaseType.signingConfig = null
+                          releaseType.signingConfig = releaseSigning
                       }
                   }
               }
@@ -138,6 +170,16 @@ jobs:
           fi
           echo "GRADLE_EXIT=$s" >> /tmp/gradle-build.log
           exit "$s"
+
+      - name: Verify APK is signed
+        if: steps.gradle_build.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find "$PROJECT_DIR/app/build/outputs/apk/release" -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          [ -n "$APK" ] || { echo 'ERROR: release APK not found'; exit 1; }
+          "$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}/apksigner" verify --verbose "$APK"
+          echo "Verified signed APK: $APK"
 
       - name: Show diagnostics
         if: always()
