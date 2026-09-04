@@ -1,0 +1,125 @@
+name: Build Dexin Mobile - Signed APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assemble source parts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t parts < <(find . -maxdepth 2 -type f -name '*.zip' -print0 | while IFS= read -r -d '' f; do b=$(basename "$f"); if [[ "$b" =~ Part([0-9]+)(-[^/]*)?\.zip$ ]]; then printf '%d\t%s\n' "${BASH_REMATCH[1]}" "$f"; fi; done | sort -n -k1,1 | cut -f2-)
+          [ "${#parts[@]}" -eq 3 ] || { echo "Expected 3 source parts, found ${#parts[@]}"; exit 1; }
+          cat "${parts[@]}" > source.zip
+          unzip -t source.zip
+          rm -rf _source
+          mkdir _source
+          unzip -q source.zip -d _source
+
+      - name: Locate Gradle project
+        shell: bash
+        run: |
+          set -euo pipefail
+          G=$(find _source -type f -name gradlew -print -quit)
+          [ -n "$G" ] || { echo 'gradlew not found'; exit 1; }
+          D=$(cd "$(dirname "$G")" && pwd)
+          echo "PROJECT_DIR=$D" >> "$GITHUB_ENV"
+          sed -i 's/\r$//' "$D/gradlew"
+          chmod +x "$D/gradlew"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.2.11394342" "cmake;3.22.1"
+
+      - name: Prepare CI signing key
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.android"
+          rm -f "$HOME/.android/debug.keystore"
+          keytool -genkeypair -noprompt \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storetype JKS \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+          keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android >/dev/null
+
+      - name: Force release signing to CI key
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$PROJECT_DIR/signing-ci.gradle" <<'GRADLE'
+allprojects { p ->
+    p.afterEvaluate {
+        def a = p.extensions.findByName('android')
+        if (a != null) {
+            def ks = new File(System.getProperty('user.home'), '.android/debug.keystore')
+            def debug = a.signingConfigs.findByName('debug')
+            if (debug != null) {
+                debug.storeFile = ks
+                debug.storePassword = 'android'
+                debug.keyAlias = 'androiddebugkey'
+                debug.keyPassword = 'android'
+            }
+            a.signingConfigs.all { cfg ->
+                cfg.storeFile = ks
+                cfg.storePassword = 'android'
+                cfg.keyAlias = 'androiddebugkey'
+                cfg.keyPassword = 'android'
+            }
+            def release = a.buildTypes.findByName('release')
+            if (release != null && debug != null) release.signingConfig = debug
+        }
+    }
+}
+GRADLE
+          test -s "$PROJECT_DIR/signing-ci.gradle"
+
+      - name: Build signed Release APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --stacktrace --warning-mode all clean
+          ./gradlew --no-daemon --stacktrace --warning-mode all -I signing-ci.gradle :app:assembleRelease
+          APK=$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)
+          [ -n "$APK" ] || { echo 'Release APK not found'; exit 1; }
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose "$APK"
+          cp "$APK" "$GITHUB_WORKSPACE/DexinMobile.apk"
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DexinMobile-APK-SIGNED
+          path: DexinMobile.apk
+          if-no-files-found: error
+          retention-days: 14
